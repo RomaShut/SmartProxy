@@ -47,6 +47,7 @@ const (
 	SchemeHysteria2 ProxyScheme = "hysteria2"
 	SchemeHy2       ProxyScheme = "hy2"
 	SchemeTUIC      ProxyScheme = "tuic"
+	SchemeAnyTLS    ProxyScheme = "anytls"
 )
 
 // Mode values for Proxy.EffectiveMode — the same three-state status marker shadowsocks uses
@@ -332,7 +333,7 @@ func isAlphaNum(b byte) bool {
 func (p *Proxy) SchemeSupportsUDP() bool {
 	switch p.Scheme {
 	case SchemeSOCKS5, SchemeSOCKS5H, SchemeSS,
-		SchemeVLESS, SchemeVMess, SchemeTrojan, SchemeHysteria2, SchemeHy2, SchemeTUIC:
+		SchemeVLESS, SchemeVMess, SchemeTrojan, SchemeHysteria2, SchemeHy2, SchemeTUIC, SchemeAnyTLS:
 		return true
 	}
 	return p.singboxTag != ""

@@ -374,6 +374,38 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 			if netType != "" {
 				q.Set("type", netType)
 			}
+			if fp, _ := p["client-fingerprint"].(string); fp != "" {
+				q.Set("fp", fp)
+			}
+			if wsOpts, ok := p["ws-opts"].(map[string]any); ok {
+				if path, _ := wsOpts["path"].(string); path != "" {
+					q.Set("path", path)
+				}
+				if headers, ok := wsOpts["headers"].(map[string]any); ok {
+					if host, _ := headers["Host"].(string); host != "" {
+						q.Set("host", host)
+					}
+				}
+			}
+			u.RawQuery = q.Encode()
+			u.Fragment = name
+			proxyURL = u.String()
+
+		case "anytls":
+			password, _ := p["password"].(string)
+			sni, _ := p["sni"].(string)
+			u := url.URL{
+				Scheme: "anytls",
+				User:   url.User(password),
+				Host:   fmt.Sprintf("%s:%d", server, port),
+			}
+			q := u.Query()
+			if sni != "" {
+				q.Set("sni", sni)
+			}
+			if skipCert, ok := p["skip-cert-verify"].(bool); ok && skipCert {
+				q.Set("insecure", "1")
+			}
 			u.RawQuery = q.Encode()
 			u.Fragment = name
 			proxyURL = u.String()
@@ -498,7 +530,7 @@ func isProxyList(s string) bool {
 }
 
 var knownSchemes = []string{
-	"ss://", "vmess://", "vless://", "trojan://", "hysteria2://", "hy2://", "tuic://", "socks5://", "socks5h://", "http://", "https://",
+	"ss://", "vmess://", "vless://", "trojan://", "hysteria2://", "hy2://", "tuic://", "anytls://", "socks5://", "socks5h://", "http://", "https://",
 }
 
 func extractLineAliasAndValidate(line string, index int) (string, bool) {

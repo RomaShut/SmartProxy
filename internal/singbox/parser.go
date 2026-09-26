@@ -54,6 +54,8 @@ func ParseLink(link string) (*ParsedOutbound, error) {
 		return parseTrojan(u)
 	case "tuic":
 		return parseTUIC(u)
+	case "anytls":
+		return parseAnyTLS(u)
 	default:
 		return nil, fmt.Errorf("unsupported singbox scheme %q", scheme)
 	}
@@ -344,6 +346,52 @@ func parseTUIC(u *url.URL) (*ParsedOutbound, error) {
 	return &ParsedOutbound{
 		Tag:     tag,
 		Type:    "tuic",
+		Server:  host,
+		Port:    port,
+		RawJSON: raw,
+	}, nil
+}
+
+func parseAnyTLS(u *url.URL) (*ParsedOutbound, error) {
+	password := u.User.Username()
+	if password == "" {
+		return nil, errors.New("anytls missing password")
+	}
+	host := u.Hostname()
+	port := parsePort(u.Port(), 443)
+	tag := cleanTag(u.Fragment, fmt.Sprintf("anytls-%s-%d", host, port))
+
+	q := u.Query()
+	tlsConfig := map[string]any{
+		"enabled": true,
+	}
+	sni := q.Get("sni")
+	if sni != "" {
+		tlsConfig["server_name"] = sni
+	}
+	if alpn := q.Get("alpn"); alpn != "" {
+		tlsConfig["alpn"] = strings.Split(alpn, ",")
+	}
+	if q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true") {
+		tlsConfig["insecure"] = true
+	}
+
+	outbound := map[string]any{
+		"type":        "anytls",
+		"tag":         tag,
+		"server":      host,
+		"server_port": port,
+		"password":    password,
+		"tls":         tlsConfig,
+	}
+
+	raw, err := json.Marshal(outbound)
+	if err != nil {
+		return nil, err
+	}
+	return &ParsedOutbound{
+		Tag:     tag,
+		Type:    "anytls",
 		Server:  host,
 		Port:    port,
 		RawJSON: raw,

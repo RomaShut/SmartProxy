@@ -29,7 +29,7 @@ func isSingBoxURL(link string) bool {
 	}
 	lower := strings.ToLower(link)
 	for _, scheme := range []string{
-		"vless://", "vmess://", "trojan://", "hysteria2://", "hy2://", "tuic://",
+		"vless://", "vmess://", "trojan://", "hysteria2://", "hy2://", "tuic://", "anytls://",
 	} {
 		if strings.HasPrefix(lower, scheme) {
 			return true

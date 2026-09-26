@@ -182,13 +182,32 @@ proxies:
     port: 443
     password: pass
     sni: example.com
+  - name: "Clash-AnyTLS"
+    type: anytls
+    server: 9.10.11.12
+    port: 443
+    password: anytlspassword
+    sni: anytls.example.com
+  - name: "Clash-VLESS-WS"
+    type: vless
+    server: 104.26.13.116
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: ws
+    tls: true
+    servername: ws.example.com
+    client-fingerprint: chrome
+    ws-opts:
+      path: /ws-path
+      headers:
+        Host: ws.example.com
 `
 	entries, _, err := ParseContent("auto", nil, []byte(clashYAML))
 	if err != nil {
 		t.Fatalf("failed to parse Clash YAML: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
 	}
 	if entries[0].Alias != "Clash-SS" {
 		t.Errorf("expected Clash-SS, got %s", entries[0].Alias)
@@ -196,4 +215,11 @@ proxies:
 	if entries[1].Alias != "Clash-Trojan" {
 		t.Errorf("expected Clash-Trojan, got %s", entries[1].Alias)
 	}
+	if entries[2].Alias != "Clash-AnyTLS" {
+		t.Errorf("expected Clash-AnyTLS, got %s", entries[2].Alias)
+	}
+	if entries[3].Alias != "Clash-VLESS-WS" {
+		t.Errorf("expected Clash-VLESS-WS, got %s", entries[3].Alias)
+	}
 }
+

@@ -835,7 +835,7 @@ function isUDPSupportedScheme(p){
   if(!p)return false;
   if(p.udp_capability&&p.udp_capability!=='none')return true;
   var s=(typeof p==='string'?p:(p.scheme||'')).toLowerCase();
-  return /^(socks5|socks5h|ss|shadowsocks|vless|vmess|trojan|hysteria2|hy2|tuic)$/.test(s);
+  return /^(socks5|socks5h|ss|shadowsocks|vless|vmess|trojan|hysteria2|hy2|tuic|anytls)$/.test(s);
 }
 // Per-circuit connectivity badge: up / half (recovering) / down (circuit open) /
 // unknown (never probed yet, e.g. health check disabled) / n/a (scheme without UDP).

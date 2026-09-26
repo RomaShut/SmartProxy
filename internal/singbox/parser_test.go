@@ -156,3 +156,39 @@ func TestParseRawJSON(t *testing.T) {
 		t.Errorf("expected port 8388, got %d", out.Port)
 	}
 }
+
+func TestParseAnyTLS(t *testing.T) {
+	link := "anytls://eca527ad-8a05-4a4a-8b0c-b078926001bf@209.33.173.15:443?insecure=0&sni=down.debian7.com#Japan-AnyTLS"
+	out, err := ParseLink(link)
+	if err != nil {
+		t.Fatalf("ParseLink failed: %v", err)
+	}
+	if out.Tag != "Japan-AnyTLS" {
+		t.Errorf("expected tag Japan-AnyTLS, got %s", out.Tag)
+	}
+	if out.Type != "anytls" {
+		t.Errorf("expected type anytls, got %s", out.Type)
+	}
+	if out.Server != "209.33.173.15" {
+		t.Errorf("expected server 209.33.173.15, got %s", out.Server)
+	}
+	if out.Port != 443 {
+		t.Errorf("expected port 443, got %d", out.Port)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(out.RawJSON, &m); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+	if m["password"] != "eca527ad-8a05-4a4a-8b0c-b078926001bf" {
+		t.Errorf("unexpected password: %v", m["password"])
+	}
+	tls, ok := m["tls"].(map[string]any)
+	if !ok || tls["enabled"] != true {
+		t.Fatalf("expected tls.enabled=true")
+	}
+	if tls["server_name"] != "down.debian7.com" {
+		t.Errorf("unexpected server_name: %v", tls["server_name"])
+	}
+}
+
