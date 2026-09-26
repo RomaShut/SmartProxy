@@ -108,19 +108,21 @@ func TestDailyFileLogger_RetentionCleanup(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
+	loc := shanghaiLocation()
+	refTime := time.Now().In(loc)
+	yesterday := refTime.AddDate(0, 0, -1)
+	oldDate := refTime.AddDate(0, 0, -10)
+
 	// Create dummy log files
-	oldFile := filepath.Join(tempDir, "smartproxy_2020-01-01.log")
-	recentFile := filepath.Join(tempDir, "smartproxy_2026-09-23.log")
-	todayFile := filepath.Join(tempDir, "smartproxy_2026-09-24.log")
+	oldFile := filepath.Join(tempDir, fmt.Sprintf("smartproxy_%s.log", oldDate.Format("2006-01-02")))
+	recentFile := filepath.Join(tempDir, fmt.Sprintf("smartproxy_%s.log", yesterday.Format("2006-01-02")))
+	todayFile := filepath.Join(tempDir, fmt.Sprintf("smartproxy_%s.log", refTime.Format("2006-01-02")))
 	otherFile := filepath.Join(tempDir, "ignore_me.txt")
 
 	_ = os.WriteFile(oldFile, []byte("old log\n"), 0644)
 	_ = os.WriteFile(recentFile, []byte("recent log\n"), 0644)
 	_ = os.WriteFile(todayFile, []byte("today log\n"), 0644)
 	_ = os.WriteFile(otherFile, []byte("other file\n"), 0644)
-
-	loc := shanghaiLocation()
-	refTime, _ := time.ParseInLocation("2006-01-02", "2026-09-24", loc)
 
 	logger, err := NewDailyFileLogger(tempDir, 3, loc)
 	if err != nil {
