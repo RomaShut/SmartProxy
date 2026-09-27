@@ -201,13 +201,61 @@ proxies:
       path: /ws-path
       headers:
         Host: ws.example.com
+  - name: "Clash-VMess-WS"
+    type: vmess
+    server: 1.2.3.4
+    port: 10086
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    alterId: 2
+    cipher: auto
+    network: ws
+    tls: true
+    servername: vmess.example.com
+    skip-cert-verify: true
+    ws-opts:
+      path: /vmess-ws
+      headers:
+        Host: vmess.example.com
+  - name: "Clash-VLESS-Reality"
+    type: vless
+    server: 5.6.7.8
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    network: tcp
+    tls: true
+    servername: reality.example.com
+    reality-opts:
+      public-key: test-pbk
+      short-id: test-sid
+  - name: "Clash-Trojan-WS"
+    type: trojan
+    server: 9.10.11.12
+    port: 443
+    password: pass
+    sni: trojan.example.com
+    network: ws
+    ws-opts:
+      path: /trojan-ws
+  - name: "Clash-Hysteria2"
+    type: hysteria2
+    server: 13.14.15.16
+    port: 4433
+    password: pass
+    sni: hy2.example.com
+    skip-cert-verify: true
+    alpn:
+      - h3
+  - name: "Clash-HTTP"
+    type: http
+    server: 17.18.19.20
+    port: 8080
 `
 	entries, _, err := ParseContent("auto", nil, []byte(clashYAML))
 	if err != nil {
 		t.Fatalf("failed to parse Clash YAML: %v", err)
 	}
-	if len(entries) != 4 {
-		t.Fatalf("expected 4 entries, got %d", len(entries))
+	if len(entries) != 9 {
+		t.Fatalf("expected 9 entries, got %d", len(entries))
 	}
 	if entries[0].Alias != "Clash-SS" {
 		t.Errorf("expected Clash-SS, got %s", entries[0].Alias)
@@ -220,6 +268,21 @@ proxies:
 	}
 	if entries[3].Alias != "Clash-VLESS-WS" {
 		t.Errorf("expected Clash-VLESS-WS, got %s", entries[3].Alias)
+	}
+	if entries[4].Alias != "Clash-VMess-WS" {
+		t.Errorf("expected Clash-VMess-WS, got %s", entries[4].Alias)
+	}
+	if entries[5].Alias != "Clash-VLESS-Reality" {
+		t.Errorf("expected Clash-VLESS-Reality, got %s", entries[5].Alias)
+	}
+	if entries[6].Alias != "Clash-Trojan-WS" {
+		t.Errorf("expected Clash-Trojan-WS, got %s", entries[6].Alias)
+	}
+	if entries[7].Alias != "Clash-Hysteria2" {
+		t.Errorf("expected Clash-Hysteria2, got %s", entries[7].Alias)
+	}
+	if entries[8].Alias != "Clash-HTTP" {
+		t.Errorf("expected Clash-HTTP, got %s", entries[8].Alias)
 	}
 }
 

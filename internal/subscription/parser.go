@@ -352,6 +352,9 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 			}
 			tls, _ := p["tls"].(bool)
 			sni, _ := p["servername"].(string)
+			if sni == "" {
+				sni, _ = p["sni"].(string)
+			}
 			flow, _ := p["flow"].(string)
 			netType, _ := p["network"].(string)
 			u := url.URL{
@@ -360,7 +363,18 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 				Host:   fmt.Sprintf("%s:%d", server, port),
 			}
 			q := u.Query()
-			if tls {
+			if realityOpts, ok := p["reality-opts"].(map[string]any); ok {
+				q.Set("security", "reality")
+				if pbk, _ := realityOpts["public-key"].(string); pbk != "" {
+					q.Set("pbk", pbk)
+				}
+				if sid, _ := realityOpts["short-id"].(string); sid != "" {
+					q.Set("sid", sid)
+				}
+				if sni != "" {
+					q.Set("sni", sni)
+				}
+			} else if tls {
 				q.Set("security", "tls")
 				if sni != "" {
 					q.Set("sni", sni)
@@ -370,6 +384,16 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 			}
 			if flow != "" {
 				q.Set("flow", flow)
+			}
+			if skipCert, ok := p["skip-cert-verify"].(bool); ok && skipCert {
+				q.Set("insecure", "1")
+			}
+			if alpn, ok := p["alpn"].([]any); ok && len(alpn) > 0 {
+				var alpnStrs []string
+				for _, a := range alpn {
+					alpnStrs = append(alpnStrs, fmt.Sprint(a))
+				}
+				q.Set("alpn", strings.Join(alpnStrs, ","))
 			}
 			if netType != "" {
 				q.Set("type", netType)
@@ -387,9 +411,117 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 					}
 				}
 			}
+			if xhttpOpts, ok := p["xhttp-opts"].(map[string]any); ok {
+				if path, _ := xhttpOpts["path"].(string); path != "" {
+					q.Set("path", path)
+				}
+				if host, _ := xhttpOpts["host"].(string); host != "" {
+					q.Set("host", host)
+				}
+			}
+			if httpOpts, ok := p["http-opts"].(map[string]any); ok {
+				if paths, ok := httpOpts["path"].([]any); ok && len(paths) > 0 {
+					q.Set("path", fmt.Sprint(paths[0]))
+				} else if pStr, ok := httpOpts["path"].(string); ok {
+					q.Set("path", pStr)
+				}
+				if headers, ok := httpOpts["headers"].(map[string]any); ok {
+					if hosts, ok := headers["Host"].([]any); ok && len(hosts) > 0 {
+						q.Set("host", fmt.Sprint(hosts[0]))
+					} else if hStr, ok := headers["Host"].(string); ok {
+						q.Set("host", hStr)
+					}
+				}
+			}
+			if grpcOpts, ok := p["grpc-opts"].(map[string]any); ok {
+				if svc, _ := grpcOpts["grpc-service-name"].(string); svc != "" {
+					q.Set("serviceName", svc)
+				}
+			}
 			u.RawQuery = q.Encode()
 			u.Fragment = name
 			proxyURL = u.String()
+
+		case "vmess":
+			uuid, _ := p["uuid"].(string)
+			if uuid == "" {
+				continue
+			}
+			alterId := parsePortAny(p["alterId"])
+			netType, _ := p["network"].(string)
+			if netType == "" {
+				netType = "tcp"
+			}
+			tlsFlag, _ := p["tls"].(bool)
+			tlsStr := ""
+			if tlsFlag {
+				tlsStr = "tls"
+			}
+			sni, _ := p["servername"].(string)
+			if sni == "" {
+				sni, _ = p["sni"].(string)
+			}
+			cipher, _ := p["cipher"].(string)
+			if cipher == "" {
+				cipher = "auto"
+			}
+			host := ""
+			path := ""
+			if wsOpts, ok := p["ws-opts"].(map[string]any); ok {
+				path, _ = wsOpts["path"].(string)
+				if headers, ok := wsOpts["headers"].(map[string]any); ok {
+					host, _ = headers["Host"].(string)
+				}
+			}
+			if httpOpts, ok := p["http-opts"].(map[string]any); ok {
+				if paths, ok := httpOpts["path"].([]any); ok && len(paths) > 0 {
+					path = fmt.Sprint(paths[0])
+				} else if pStr, ok := httpOpts["path"].(string); ok {
+					path = pStr
+				}
+				if headers, ok := httpOpts["headers"].(map[string]any); ok {
+					if hosts, ok := headers["Host"].([]any); ok && len(hosts) > 0 {
+						host = fmt.Sprint(hosts[0])
+					} else if hStr, ok := headers["Host"].(string); ok {
+						host = hStr
+					}
+				}
+			}
+			if grpcOpts, ok := p["grpc-opts"].(map[string]any); ok {
+				if svc, _ := grpcOpts["grpc-service-name"].(string); svc != "" {
+					path = svc
+				}
+			}
+			skipCert, _ := p["skip-cert-verify"].(bool)
+			var alpnStr string
+			if alpn, ok := p["alpn"].([]any); ok && len(alpn) > 0 {
+				var alpnStrs []string
+				for _, a := range alpn {
+					alpnStrs = append(alpnStrs, fmt.Sprint(a))
+				}
+				alpnStr = strings.Join(alpnStrs, ",")
+			}
+			vObj := map[string]any{
+				"v":        "2",
+				"ps":       name,
+				"add":      server,
+				"port":     port,
+				"id":       uuid,
+				"aid":      alterId,
+				"scy":      cipher,
+				"net":      netType,
+				"type":     "none",
+				"host":     host,
+				"path":     path,
+				"tls":      tlsStr,
+				"sni":      sni,
+				"alpn":     alpnStr,
+				"insecure": skipCert,
+			}
+			vBytes, err := json.Marshal(vObj)
+			if err == nil {
+				proxyURL = "vmess://" + base64.StdEncoding.EncodeToString(vBytes)
+			}
 
 		case "anytls":
 			password, _ := p["password"].(string)
@@ -413,6 +545,10 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 		case "trojan":
 			password, _ := p["password"].(string)
 			sni, _ := p["sni"].(string)
+			if sni == "" {
+				sni, _ = p["servername"].(string)
+			}
+			netType, _ := p["network"].(string)
 			u := url.URL{
 				Scheme: "trojan",
 				User:   url.User(password),
@@ -422,6 +558,34 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 			if sni != "" {
 				q.Set("sni", sni)
 			}
+			if netType != "" {
+				q.Set("type", netType)
+			}
+			if skipCert, ok := p["skip-cert-verify"].(bool); ok && skipCert {
+				q.Set("insecure", "1")
+			}
+			if alpn, ok := p["alpn"].([]any); ok && len(alpn) > 0 {
+				var alpnStrs []string
+				for _, a := range alpn {
+					alpnStrs = append(alpnStrs, fmt.Sprint(a))
+				}
+				q.Set("alpn", strings.Join(alpnStrs, ","))
+			}
+			if wsOpts, ok := p["ws-opts"].(map[string]any); ok {
+				if path, _ := wsOpts["path"].(string); path != "" {
+					q.Set("path", path)
+				}
+				if headers, ok := wsOpts["headers"].(map[string]any); ok {
+					if host, _ := headers["Host"].(string); host != "" {
+						q.Set("host", host)
+					}
+				}
+			}
+			if grpcOpts, ok := p["grpc-opts"].(map[string]any); ok {
+				if svc, _ := grpcOpts["grpc-service-name"].(string); svc != "" {
+					q.Set("serviceName", svc)
+				}
+			}
 			u.RawQuery = q.Encode()
 			u.Fragment = name
 			proxyURL = u.String()
@@ -429,6 +593,9 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 		case "hysteria2":
 			password, _ := p["password"].(string)
 			sni, _ := p["sni"].(string)
+			if sni == "" {
+				sni, _ = p["servername"].(string)
+			}
 			u := url.URL{
 				Scheme: "hysteria2",
 				User:   url.User(password),
@@ -437,6 +604,16 @@ func parseClashYAML(data []byte) ([]upstream.ProxyEntry, error) {
 			q := u.Query()
 			if sni != "" {
 				q.Set("sni", sni)
+			}
+			if skipCert, ok := p["skip-cert-verify"].(bool); ok && skipCert {
+				q.Set("insecure", "1")
+			}
+			if alpn, ok := p["alpn"].([]any); ok && len(alpn) > 0 {
+				var alpnStrs []string
+				for _, a := range alpn {
+					alpnStrs = append(alpnStrs, fmt.Sprint(a))
+				}
+				q.Set("alpn", strings.Join(alpnStrs, ","))
 			}
 			u.RawQuery = q.Encode()
 			u.Fragment = name

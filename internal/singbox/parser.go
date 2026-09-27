@@ -139,6 +139,14 @@ func parseVLESS(u *url.URL) (*ParsedOutbound, error) {
 		tlsConfig["server_name"] = sni
 	}
 
+	if q.Get("insecure") == "1" || strings.ToLower(q.Get("insecure")) == "true" {
+		tlsConfig["insecure"] = true
+	}
+
+	if alpn := q.Get("alpn"); alpn != "" {
+		tlsConfig["alpn"] = strings.Split(alpn, ",")
+	}
+
 	fp := q.Get("fp")
 	if fp != "" {
 		tlsConfig["utls"] = map[string]any{
@@ -182,6 +190,24 @@ func parseVLESS(u *url.URL) (*ParsedOutbound, error) {
 			"type":         "grpc",
 			"service_name": q.Get("serviceName"),
 		}
+	} else if transportType == "http" {
+		httpConfig := map[string]any{
+			"type": "http",
+			"path": q.Get("path"),
+		}
+		if h := q.Get("host"); h != "" {
+			httpConfig["host"] = strings.Split(h, ",")
+		}
+		outbound["transport"] = httpConfig
+	} else if transportType == "httpupgrade" {
+		httpUpgradeConfig := map[string]any{
+			"type": "httpupgrade",
+			"path": q.Get("path"),
+		}
+		if h := q.Get("host"); h != "" {
+			httpUpgradeConfig["host"] = h
+		}
+		outbound["transport"] = httpUpgradeConfig
 	}
 
 	raw, err := json.Marshal(outbound)
@@ -289,6 +315,24 @@ func parseTrojan(u *url.URL) (*ParsedOutbound, error) {
 			"type":         "grpc",
 			"service_name": q.Get("serviceName"),
 		}
+	} else if transportType == "http" {
+		httpConfig := map[string]any{
+			"type": "http",
+			"path": q.Get("path"),
+		}
+		if h := q.Get("host"); h != "" {
+			httpConfig["host"] = strings.Split(h, ",")
+		}
+		outbound["transport"] = httpConfig
+	} else if transportType == "httpupgrade" {
+		httpUpgradeConfig := map[string]any{
+			"type": "httpupgrade",
+			"path": q.Get("path"),
+		}
+		if h := q.Get("host"); h != "" {
+			httpUpgradeConfig["host"] = h
+		}
+		outbound["transport"] = httpUpgradeConfig
 	}
 
 	raw, err := json.Marshal(outbound)
@@ -421,18 +465,21 @@ func parseVMess(link string) (*ParsedOutbound, error) {
 	}
 
 	var v struct {
-		V    any    `json:"v"`
-		PS   string `json:"ps"`
-		Add  string `json:"add"`
-		Port any    `json:"port"`
-		ID   string `json:"id"`
-		Aid  any    `json:"aid"`
-		Net  string `json:"net"`
-		Type string `json:"type"`
-		Host string `json:"host"`
-		Path string `json:"path"`
-		TLS  string `json:"tls"`
-		SNI  string `json:"sni"`
+		V        any    `json:"v"`
+		PS       string `json:"ps"`
+		Add      string `json:"add"`
+		Port     any    `json:"port"`
+		ID       string `json:"id"`
+		Aid      any    `json:"aid"`
+		Net      string `json:"net"`
+		Type     string `json:"type"`
+		Host     string `json:"host"`
+		Path     string `json:"path"`
+		TLS      string `json:"tls"`
+		SNI      string `json:"sni"`
+		ALPN     string `json:"alpn"`
+		Scy      string `json:"scy"`
+		Insecure any    `json:"insecure"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal vmess json: %w", err)
@@ -464,6 +511,11 @@ func parseVMess(link string) (*ParsedOutbound, error) {
 	}
 	tag = cleanTag(tag, fmt.Sprintf("vmess-%s-%d", v.Add, port))
 
+	security := "auto"
+	if v.Scy != "" {
+		security = v.Scy
+	}
+
 	outbound := map[string]any{
 		"type":        "vmess",
 		"tag":         tag,
@@ -471,7 +523,7 @@ func parseVMess(link string) (*ParsedOutbound, error) {
 		"server_port": port,
 		"uuid":        v.ID,
 		"alter_id":    alterId,
-		"security":    "auto",
+		"security":    security,
 	}
 
 	if strings.ToLower(v.TLS) == "tls" {
@@ -482,6 +534,21 @@ func parseVMess(link string) (*ParsedOutbound, error) {
 			tlsConfig["server_name"] = v.SNI
 		} else if v.Host != "" {
 			tlsConfig["server_name"] = v.Host
+		}
+		if v.ALPN != "" {
+			tlsConfig["alpn"] = strings.Split(v.ALPN, ",")
+		}
+		insecure := false
+		switch ins := v.Insecure.(type) {
+		case bool:
+			insecure = ins
+		case string:
+			insecure = ins == "1" || strings.ToLower(ins) == "true"
+		case float64:
+			insecure = ins != 0
+		}
+		if insecure {
+			tlsConfig["insecure"] = true
 		}
 		outbound["tls"] = tlsConfig
 	}
@@ -500,6 +567,24 @@ func parseVMess(link string) (*ParsedOutbound, error) {
 			"type":         "grpc",
 			"service_name": v.Path,
 		}
+	} else if v.Net == "http" {
+		httpConfig := map[string]any{
+			"type": "http",
+			"path": v.Path,
+		}
+		if v.Host != "" {
+			httpConfig["host"] = strings.Split(v.Host, ",")
+		}
+		outbound["transport"] = httpConfig
+	} else if v.Net == "httpupgrade" {
+		httpUpgradeConfig := map[string]any{
+			"type": "httpupgrade",
+			"path": v.Path,
+		}
+		if v.Host != "" {
+			httpUpgradeConfig["host"] = v.Host
+		}
+		outbound["transport"] = httpUpgradeConfig
 	}
 
 	raw, err := json.Marshal(outbound)
