@@ -218,14 +218,15 @@ func (ph *ProxyHealth) Snapshot() ProxyHealthSnapshot {
 }
 
 type HealthChecker struct {
+	lifecycleMu    sync.Mutex
 	cfg            atomic.Pointer[config.HealthCheckConf]
 	proxies        []*Proxy
 	stopCh         chan struct{}
 	stopOnce       sync.Once
-	wg             sync.WaitGroup
+	wg             *sync.WaitGroup
 	ctx            context.Context
 	cancel         context.CancelFunc
-	probeSem chan struct{}
+	probeSem       chan struct{}
 	// firstProbeDone 是"任意电路"的聚合闸门(任一探测成功或初始探测全部结束即关闭)。
 	// firstTCPProbeDone/firstUDPProbeDone 按电路分别关门:ConnectDefault 必须等 TCP 闸门,
 	// UDP ASSOCIATE 必须等 UDP 闸门。早期共用一个 firstProbeDone 时,checkProxy 先探 UDP
@@ -272,6 +273,11 @@ func (hc *HealthChecker) Start() {
 		return
 	}
 
+	hc.lifecycleMu.Lock()
+	wg := &sync.WaitGroup{}
+	hc.wg = wg
+	hc.lifecycleMu.Unlock()
+
 	var initialWg sync.WaitGroup
 	initialWg.Add(len(hc.proxies))
 	safego.Go("upstream.health.initialProbeWatcher", func() {
@@ -284,8 +290,8 @@ func (hc *HealthChecker) Start() {
 	for i, p := range hc.proxies {
 		idx := i
 		proxy := p
-		hc.wg.Add(1)
-		safego.Go("upstream.health.checkLoop", func() { hc.checkLoop(proxy, idx, &initialWg) })
+		wg.Add(1)
+		safego.Go("upstream.health.checkLoop", func() { hc.checkLoop(proxy, idx, &initialWg, wg) })
 	}
 }
 
@@ -297,15 +303,23 @@ func (hc *HealthChecker) Stop() {
 	hc.cancel()
 	hc.stopOnce.Do(func() { close(hc.stopCh) })
 	hc.notifyAllFirstProbesDone()
-	done := make(chan struct{})
-	safego.Go("upstream.health.stopWait", func() {
-		hc.wg.Wait()
-		close(done)
-	})
-	select {
-	case <-done:
-	case <-time.After(800 * time.Millisecond):
-		slog.Warn("health checker stop timed out waiting for check loops to exit")
+
+	hc.lifecycleMu.Lock()
+	wg := hc.wg
+	hc.wg = nil
+	hc.lifecycleMu.Unlock()
+
+	if wg != nil {
+		done := make(chan struct{})
+		safego.Go("upstream.health.stopWait", func() {
+			wg.Wait()
+			close(done)
+		})
+		select {
+		case <-done:
+		case <-time.After(800 * time.Millisecond):
+			slog.Warn("health checker stop timed out waiting for check loops to exit")
+		}
 	}
 }
 
@@ -504,8 +518,10 @@ func (hc *HealthChecker) ProbeAll() {
 	}
 }
 
-func (hc *HealthChecker) checkLoop(p *Proxy, idx int, initialWg *sync.WaitGroup) {
-	defer hc.wg.Done()
+func (hc *HealthChecker) checkLoop(p *Proxy, idx int, initialWg *sync.WaitGroup, wg *sync.WaitGroup) {
+	if wg != nil {
+		defer wg.Done()
+	}
 
 	// Stagger initial delays: Proxy 0 starts at 0ms delay, 1-15 with 10ms-150ms delay,
 	// subsequent nodes staggered to bound initial load on system sockets.

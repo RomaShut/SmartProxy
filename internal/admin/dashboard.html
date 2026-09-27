@@ -1137,13 +1137,109 @@ function toggleGroupCollapse(gid){
   // 否则临时展开时点一下会被误判。手动选择显式持久化,并清掉临时展开。
   var visuallyCollapsed=_forceOpenGroups[gid]?false:(proxyGroupsCollapsed[gid]!==undefined?!!proxyGroupsCollapsed[gid]:true);
   delete _forceOpenGroups[gid];
-  proxyGroupsCollapsed[gid]=!visuallyCollapsed;
+  var isCollapsed=!visuallyCollapsed;
+  proxyGroupsCollapsed[gid]=isCollapsed;
   saveProxyGroupsCollapsed();
   var sec=document.querySelector('.proxy-group-section[data-group="'+gid+'"]');
   if(sec){
-    sec.classList.toggle('collapsed',!!proxyGroupsCollapsed[gid]);
+    sec.classList.toggle('collapsed',isCollapsed);
     var btn=sec.querySelector('.proxy-group-collapse-btn');
-    if(btn)btn.textContent=t(proxyGroupsCollapsed[gid]?'Expand':'Collapse');
+    if(btn)btn.textContent=t(isCollapsed?'Expand':'Collapse');
+    var cardsEl=document.getElementById('group-cards-'+gid);
+    if(cardsEl){
+      if(isCollapsed){
+        cardsEl.innerHTML='';
+      }else{
+        renderGroupCards(gid, cardsEl);
+      }
+    }
+  }
+}
+function computeCardHash(p, i){
+  if(!p)return '';
+  var udpScheme=isUDPSupportedScheme(p);
+  var anyUp=p.health.available||(udpScheme&&p.udp_health&&p.udp_health.available);
+  var latVal=(p.mode==='udp_only'&&p.udp_health&&p.udp_health.latency>0)?p.udp_health.latency:p.health.latency;
+  var pingVal=(p.ping_latency&&p.ping_latency>0)?(p.ping_latency/1e6):0;
+  var stTCPing=proxyTestState[p.alias+':tcping']||proxyTestState[p.alias+':ping'];
+  if(stTCPing&&stTCPing.available&&stTCPing.latency_ms>0)pingVal=stTCPing.latency_ms;
+  var stTCP=proxyTestState[p.alias+':tcp'];
+  var stUDP=proxyTestState[p.alias+':udp'];
+  var tc=circuitStat(p.health,true),uc=circuitStat(p.udp_health,udpScheme);
+  return [
+    p.alias,
+    i,
+    anyUp?1:0,
+    p.mode||'',
+    latVal,
+    pingVal.toFixed(1),
+    tc.c, tc.m?1:0,
+    uc.c, uc.m?1:0,
+    p.health.consecutive_failures,
+    p.health.manual?1:0,
+    p.udp_health?(p.udp_health.consecutive_failures+':'+(p.udp_health.manual?1:0)):'',
+    stTCPing?(stTCPing.testing?'T':(stTCPing.available?stTCPing.latency_ms:'F')):'',
+    stTCP?(stTCP.testing?'T':(stTCP.available?stTCP.latency_ms:'F')):'',
+    stUDP?(stUDP.testing?'T':(stUDP.available?stUDP.latency_ms:'F')):'',
+    p.exit_ip||'',
+    p.country_code||'',
+    p.name||''
+  ].join(';');
+}
+function renderGroupCards(gid, container){
+  if(!container)container=document.getElementById('group-cards-'+gid);
+  if(!container)return;
+  var g=window._currentProxyGroups&&window._currentProxyGroups[gid];
+  if(!g)return;
+  if(g.items.length===0){
+    var emptyMsg='';
+    var lanternEnabled=window._lanternEnabled;
+    if(gid==='lantern'&&!lanternEnabled){
+      emptyMsg=t('Lantern shared pool is disabled. Click Enable to fetch free nodes.');
+    }else if(gid==='lantern'&&lanternEnabled){
+      emptyMsg=t('Fetching nodes from Lantern...');
+    }else if(gid.indexOf('sub:')===0&&g.disabled){
+      emptyMsg=t('Subscription is disabled. Click Enable to activate nodes.');
+    }else if(gid.indexOf('sub:')===0&&!g.disabled){
+      emptyMsg=t('Subscription has no nodes. Click Refresh to fetch nodes.');
+    }else{
+      emptyMsg=t('No entries');
+    }
+    container.innerHTML='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+emptyMsg+'</div>';
+    return;
+  }
+  g.items.sort(function(a,b){
+    var latA=getNodeTCPLatency(a.proxy);
+    var latB=getNodeTCPLatency(b.proxy);
+    if(latA!==latB)return latA-latB;
+    return a.index-b.index;
+  });
+  var existingCards=container.children;
+  var canPatch=(existingCards.length===g.items.length);
+  if(canPatch){
+    for(var k=0;k<g.items.length;k++){
+      if(existingCards[k].dataset.alias!==g.items[k].proxy.alias){
+        canPatch=false;
+        break;
+      }
+    }
+  }
+  if(canPatch){
+    for(var j=0;j<g.items.length;j++){
+      var item=g.items[j];
+      var oldCard=existingCards[j];
+      var newHash=computeCardHash(item.proxy,item.index);
+      if(oldCard.dataset.hash!==newHash){
+        var temp=document.createElement('div');
+        temp.innerHTML=renderProxyCard(item.proxy,item.index);
+        var newCard=temp.firstElementChild;
+        container.replaceChild(newCard,oldCard);
+      }
+    }
+  }else{
+    container.innerHTML=g.items.map(function(item){
+      return renderProxyCard(item.proxy,item.index);
+    }).join('');
   }
 }
 function toggleProxyGroupFilter(){
@@ -1316,7 +1412,8 @@ function renderProxyCard(p,i){
       '</div>';
   }
 
-  return '<div class="proxy-card '+(anyUp?'is-up':'is-down')+'"><div class="top">'+
+  var cardHash=computeCardHash(p, i);
+  return '<div class="proxy-card '+(anyUp?'is-up':'is-down')+'" data-alias="'+escAttr(p.alias)+'" data-hash="'+escAttr(cardHash)+'"><div class="top">'+
     '<div class="node-info">'+
     '<div class="alias-row">'+flagHtml+'<span class="alias">'+dispName+'</span>'+schemeBadge+regBadgeHtml+'</div>'+
     '<div class="url">'+escHtml(dispUrl)+aliasTxt+' · '+dispMode+capTxt+'</div>'+
@@ -1437,6 +1534,53 @@ function lhealth(d){
     return;
   }
 
+  window._currentProxyGroups=groups;
+  window._lanternEnabled=lanternEnabled;
+
+  var existingSections=container.querySelectorAll(':scope > .proxy-group-section');
+  var canPatchSections=(existingSections.length===groupOrder.length);
+  if(canPatchSections){
+    for(var sIdx=0;sIdx<groupOrder.length;sIdx++){
+      if(existingSections[sIdx].dataset.group!==groupOrder[sIdx]){
+        canPatchSections=false;
+        break;
+      }
+    }
+  }
+
+  if(canPatchSections){
+    groupOrder.forEach(function(gid, sIdx){
+      var g=groups[gid];
+      var sec=existingSections[sIdx];
+      var isHidden=(proxyGroupFilter!=='all'&&proxyGroupFilter!==gid);
+      var isCollapsed=_forceOpenGroups[gid]?false:(proxyGroupsCollapsed[gid]!==undefined?!!proxyGroupsCollapsed[gid]:true);
+      var badgeText=g.disabled?t('Disabled'):(tf('{0} nodes',[g.items.length])+' · '+tf('{0} online',[g.onlineCount]));
+
+      sec.classList.toggle('collapsed',isCollapsed);
+      sec.classList.toggle('hidden',isHidden);
+
+      var badgeEl=sec.querySelector('.proxy-group-badge');
+      if(badgeEl){
+        badgeEl.textContent=badgeText;
+        badgeEl.className='proxy-group-badge '+(g.onlineCount>0?'online':'');
+      }
+
+      var collapseBtn=sec.querySelector('.proxy-group-collapse-btn');
+      if(collapseBtn)collapseBtn.textContent=t(isCollapsed?'Expand':'Collapse');
+
+      var cardsEl=document.getElementById('group-cards-'+gid);
+      if(cardsEl){
+        if(isCollapsed){
+          if(cardsEl.children.length>0)cardsEl.innerHTML='';
+        }else{
+          renderGroupCards(gid, cardsEl);
+        }
+      }
+    });
+    st('health-time');
+    return;
+  }
+
   var sectionsHtml='';
   groupOrder.forEach(function(gid){
     var g=groups[gid];
@@ -1476,28 +1620,30 @@ function lhealth(d){
     actionsHtml+='<button class="btn btn-sm ghost proxy-group-collapse-btn" onclick="toggleGroupCollapse(\''+gid+'\')">'+t(isCollapsed?'Expand':'Collapse')+'</button>';
 
     var cardsHtml='';
-    if(g.items.length===0){
-      if(gid==='lantern'&&!lanternEnabled){
-        cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Lantern shared pool is disabled. Click Enable to fetch free nodes.')+'</div>';
-      }else if(gid==='lantern'&&lanternEnabled){
-        cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Fetching nodes from Lantern...')+'</div>';
-      }else if(gid.indexOf('sub:')===0&&g.disabled){
-        cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Subscription is disabled. Click Enable to activate nodes.')+'</div>';
-      }else if(gid.indexOf('sub:')===0&&!g.disabled){
-        cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Subscription has no nodes. Click Refresh to fetch nodes.')+'</div>';
+    if(!isCollapsed){
+      if(g.items.length===0){
+        if(gid==='lantern'&&!lanternEnabled){
+          cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Lantern shared pool is disabled. Click Enable to fetch free nodes.')+'</div>';
+        }else if(gid==='lantern'&&lanternEnabled){
+          cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Fetching nodes from Lantern...')+'</div>';
+        }else if(gid.indexOf('sub:')===0&&g.disabled){
+          cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Subscription is disabled. Click Enable to activate nodes.')+'</div>';
+        }else if(gid.indexOf('sub:')===0&&!g.disabled){
+          cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('Subscription has no nodes. Click Refresh to fetch nodes.')+'</div>';
+        }else{
+          cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('No entries')+'</div>';
+        }
       }else{
-        cardsHtml='<div style="color:var(--text2);padding:24px;text-align:center;grid-column:1/-1;">'+t('No entries')+'</div>';
+        g.items.sort(function(a,b){
+          var latA=getNodeTCPLatency(a.proxy);
+          var latB=getNodeTCPLatency(b.proxy);
+          if(latA!==latB)return latA-latB;
+          return a.index-b.index;
+        });
+        cardsHtml=g.items.map(function(item){
+          return renderProxyCard(item.proxy,item.index);
+        }).join('');
       }
-    }else{
-      g.items.sort(function(a,b){
-        var latA=getNodeTCPLatency(a.proxy);
-        var latB=getNodeTCPLatency(b.proxy);
-        if(latA!==latB)return latA-latB;
-        return a.index-b.index;
-      });
-      cardsHtml=g.items.map(function(item){
-        return renderProxyCard(item.proxy,item.index);
-      }).join('');
     }
 
     sectionsHtml+='<div class="proxy-group-section '+(isCollapsed?'collapsed':'')+(isHidden?' hidden':'')+'" data-group="'+gid+'">'+

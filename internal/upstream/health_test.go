@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -518,5 +519,30 @@ func TestHealthChecker_ProbeIPv6(t *testing.T) {
 	}
 }
 
+func TestHealthChecker_StopReloadConcurrentNoPanic(t *testing.T) {
+	cfg := config.HealthCheckConf{
+		Enabled:  true,
+		Interval: 1,
+		Timeout:  1,
+	}
+	proxies := []*Proxy{
+		{Scheme: SchemeSOCKS5, Host: "127.0.0.1", Port: 59991},
+		{Scheme: SchemeSOCKS5, Host: "127.0.0.1", Port: 59992},
+	}
+	hc := NewHealthChecker(cfg, proxies)
+	hc.Start()
 
-
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				hc.Reload(cfg, proxies)
+				time.Sleep(10 * time.Millisecond)
+				hc.Stop()
+			}
+		}()
+	}
+	wg.Wait()
+}
