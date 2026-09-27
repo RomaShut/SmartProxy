@@ -1,6 +1,7 @@
 # build artifacts
 /build/
 /dist/
+/.ci-i18n/
 
 # stale binaries at repo root
 /socks5-router

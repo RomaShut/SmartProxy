@@ -314,6 +314,22 @@ tr:last-child td{border-bottom:none}
 .log-msg{flex:1;color:#e1e4ed;white-space:pre-wrap;word-break:break-all}
 .log-row{cursor:pointer}
 .copy-toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1e2e;color:#cdd6f4;padding:8px 18px;border-radius:8px;font-size:.82rem;z-index:9999;opacity:0;transition:opacity .25s ease;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.4)}
+.batch-test-progress-card{margin-bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;display:flex;flex-direction:column;gap:10px;box-shadow:0 4px 16px rgba(0,0,0,.06);transition:border-color .18s,opacity .3s ease}
+.batch-test-progress-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.batch-test-progress-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:.92rem;color:var(--text)}
+.batch-test-spinner{display:inline-block;font-size:1rem;animation:batchPulse 1.2s infinite ease-in-out}
+@keyframes batchPulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.2);opacity:.75}}
+.batch-test-progress-stats{display:flex;align-items:center;gap:8px;font-size:.82rem;flex-wrap:wrap}
+.batch-test-badge{padding:2px 8px;border-radius:4px;font-weight:500;font-size:.75rem}
+.batch-test-badge.ok{background:var(--green-bg);color:var(--green)}
+.batch-test-badge.fail{background:var(--red-bg);color:var(--red)}
+.batch-test-ratio{color:var(--text2);font-family:var(--mono);font-weight:600;font-size:.85rem}
+.batch-test-track{width:100%;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;position:relative}
+.batch-test-bar{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent) 0%,var(--green) 100%);transition:width .18s cubic-bezier(.4,0,.2,1);position:relative}
+.batch-test-bar::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.25) 50%,rgba(255,255,255,0) 100%);background-size:200% 100%;animation:batchShimmer 1.5s infinite}
+@keyframes batchShimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.proxy-group-progress-wrap{width:100%;height:3px;background:var(--surface2);overflow:hidden;border-radius:2px;margin-top:-6px;margin-bottom:6px}
+.proxy-group-progress-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--green));transition:width .18s ease}
 .app-footer{margin-top:28px;padding-top:14px;border-top:1px solid var(--border);color:var(--text3);font-size:.76rem;text-align:center}
 .app-footer a{color:var(--accent);text-decoration:none}
 .app-footer a:hover{text-decoration:underline}
@@ -512,6 +528,23 @@ function tf(s,a){s=t(s);if(a)for(var i=0;i<a.length;i++)s=s.split('{'+i+'}').joi
           <a href="https://ip.skk.moe/" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500">ip.skk.moe ↗</a>
         </div>
       </div>
+    </div>
+  </div>
+  <div class="card batch-test-progress-card" id="batch-test-progress-card" style="display:none">
+    <div class="batch-test-progress-header">
+      <div class="batch-test-progress-title">
+        <span class="batch-test-spinner">⚡</span>
+        <span id="batch-test-title">Testing Nodes...</span>
+      </div>
+      <div class="batch-test-progress-stats">
+        <span class="batch-test-badge ok" id="batch-test-ok-count">0 available</span>
+        <span class="batch-test-badge fail" id="batch-test-fail-count">0 failed</span>
+        <span class="batch-test-ratio" id="batch-test-ratio">0 / 0 (0%)</span>
+        <button class="btn btn-sm ghost danger" id="batch-test-cancel-btn" onclick="cancelBatchTest()">Cancel</button>
+      </div>
+    </div>
+    <div class="batch-test-track">
+      <div class="batch-test-bar" id="batch-test-bar" style="width:0%"></div>
     </div>
   </div>
   <div id="proxy-cards"></div>
@@ -937,6 +970,34 @@ async function testProxy(i,proto){
 var _batchTestingGroups={};
 // 测速触发的临时展开:只在本次页面会话有效,不写入 localStorage,所以重开页面会回到默认折叠。
 var _forceOpenGroups={};
+var _batchTestAbortCtrl=null;
+var _healthRefreshTimer=null;
+
+function cancelBatchTest(){
+  if(_batchTestAbortCtrl){
+    _batchTestAbortCtrl.abort();
+    var toast=document.getElementById('copy-toast');
+    if(toast)showCopyToast(toast,t('Batch test cancelled'));
+  }
+}
+
+function updateBatchTestProgress(completed, total, ok, fail, label){
+  var card=document.getElementById('batch-test-progress-card');
+  var bar=document.getElementById('batch-test-bar');
+  var titleEl=document.getElementById('batch-test-title');
+  var ratioEl=document.getElementById('batch-test-ratio');
+  var okEl=document.getElementById('batch-test-ok-count');
+  var failEl=document.getElementById('batch-test-fail-count');
+  if(!card||!bar)return;
+
+  var pct=total>0?Math.min(100, Math.round((completed/total)*100)):0;
+  bar.style.width=pct+'%';
+  if(label&&titleEl)titleEl.textContent=label;
+  if(ratioEl)ratioEl.textContent=completed+' / '+total+' ('+pct+'%)';
+  if(okEl)okEl.textContent=tf('{0} available',[ok]);
+  if(failEl)failEl.textContent=tf('{0} failed',[fail]);
+}
+
 async function testGroupProxies(gid, proto, btn){
   if(_batchTestingGroups[gid])return;
   var allProxies=(healthD&&healthD.health&&healthD.health.proxies)||[];
@@ -967,50 +1028,152 @@ async function testGroupProxies(gid, proto, btn){
   // 测速时临时展开好看到结果,但不持久化:否则测过一次该组就被永远记成展开,
   // 每次打开面板都展开,把"默认折叠"给覆盖了。
   _forceOpenGroups[gid]=true;
+
+  var totalTasks=tasks.length;
+  var completedTasks=0, okCount=0, failCount=0;
+
+  var grpLabel=(gid==='all')?t('All Proxies'):((window._currentProxyGroups&&window._currentProxyGroups[gid])?window._currentProxyGroups[gid].label:gid);
+  var runningLabel=tf('Testing {0} ({1})...',[grpLabel, proto.toUpperCase()]);
+
+  var card=document.getElementById('batch-test-progress-card');
+  var bar=document.getElementById('batch-test-bar');
+  var cancelBtn=document.getElementById('batch-test-cancel-btn');
+  var grpWrap=document.getElementById('group-progress-wrap-'+gid);
+  var grpBar=document.getElementById('group-progress-bar-'+gid);
+
+  if(card){
+    card.style.display='flex';
+    card.style.opacity='1';
+    card.classList.remove('finished');
+    if(bar)bar.style.background='';
+    if(cancelBtn)cancelBtn.style.display='';
+  }
+  if(grpWrap)grpWrap.style.display='block';
+  if(grpBar)grpBar.style.width='0%';
+
+  updateBatchTestProgress(0, totalTasks, 0, 0, runningLabel);
+
+  if(btn){
+    btn.dataset.origText=btn.textContent;
+    btn.disabled=true;
+  }
+
   for(var j=0;j<tasks.length;j++){
     proxyTestState[tasks[j].alias+':'+tasks[j].proto]={testing:true};
   }
   lhealth(healthD);
 
-  var okCount=0,failCount=0;
-  var promises=tasks.map(async function(task){
-    try{
-      var resp=await fetch('/proxy/test?alias='+encodeURIComponent(task.alias)+'&protocol='+encodeURIComponent(task.proto),{method:'POST'});
-      if(!resp.ok)throw new Error('HTTP '+resp.status);
-      var res=await resp.json();
-      var node=proxies.find(function(px){return px.alias===task.alias;});
-      if(node){
-        if(res.country_code)node.country_code=res.country_code;
-        if(res.exit_ip)node.exit_ip=res.exit_ip;
+  _batchTestAbortCtrl=new AbortController();
+  var signal=_batchTestAbortCtrl.signal;
+
+  var concurrency=8;
+  var taskIdx=0;
+
+  async function worker(){
+    while(taskIdx<tasks.length&&!signal.aborted){
+      var task=tasks[taskIdx++];
+      try{
+        var resp=await fetch('/proxy/test?alias='+encodeURIComponent(task.alias)+'&protocol='+encodeURIComponent(task.proto),{
+          method:'POST',
+          signal:signal
+        });
+        if(!resp.ok)throw new Error('HTTP '+resp.status);
+        var res=await resp.json();
+        var node=proxies.find(function(px){return px.alias===task.alias;});
+        if(node){
+          if(res.country_code)node.country_code=res.country_code;
+          if(res.exit_ip)node.exit_ip=res.exit_ip;
+        }
+        proxyTestState[task.alias+':'+task.proto]={
+          testing:false,
+          available:!!res.available,
+          latency_ms:res.latency_ms||0,
+          error:res.error||''
+        };
+        if(res.available)okCount++;else failCount++;
+      }catch(e){
+        if(e.name==='AbortError'){
+          proxyTestState[task.alias+':'+task.proto]={testing:false,available:false,error:'Aborted'};
+          break;
+        }
+        proxyTestState[task.alias+':'+task.proto]={
+          testing:false,
+          available:false,
+          error:e.message
+        };
+        failCount++;
       }
-      proxyTestState[task.alias+':'+task.proto]={
-        testing:false,
-        available:!!res.available,
-        latency_ms:res.latency_ms||0,
-        error:res.error||''
-      };
-      if(res.available)okCount++;else failCount++;
-    }catch(e){
-      proxyTestState[task.alias+':'+task.proto]={
-        testing:false,
-        available:false,
-        error:e.message
-      };
-      failCount++;
+      completedTasks++;
+      var curPct=Math.round((completedTasks/totalTasks)*100);
+      updateBatchTestProgress(completedTasks, totalTasks, okCount, failCount, runningLabel);
+      if(grpBar)grpBar.style.width=curPct+'%';
+      if(btn&&btn.dataset.origText)btn.textContent=t('Testing...')+' '+curPct+'%';
+
+      if(!_healthRefreshTimer){
+        _healthRefreshTimer=setTimeout(function(){
+          _healthRefreshTimer=null;
+          lhealth(healthD);
+        },150);
+      }
     }
-    lhealth(healthD);
-  });
+  }
+
+  var workers=[];
+  var numWorkers=Math.min(concurrency, tasks.length);
+  for(var w=0;w<numWorkers;w++){
+    workers.push(worker());
+  }
 
   try{
-    await Promise.all(promises);
+    await Promise.all(workers);
   }finally{
     delete _batchTestingGroups[gid];
+    if(_healthRefreshTimer){
+      clearTimeout(_healthRefreshTimer);
+      _healthRefreshTimer=null;
+    }
+  }
+
+  var isAborted=signal.aborted;
+  _batchTestAbortCtrl=null;
+
+  if(bar){
+    bar.style.width='100%';
+    if(!isAborted)bar.style.background='var(--green)';
+  }
+  if(grpBar)grpBar.style.width='100%';
+
+  var finishMsg=isAborted?t('Batch test cancelled'):tf('Batch test complete: {0} available, {1} failed',[String(okCount),String(failCount)]);
+  updateBatchTestProgress(completedTasks, totalTasks, okCount, failCount, finishMsg);
+
+  if(cancelBtn)cancelBtn.style.display='none';
+  if(card)card.classList.add('finished');
+
+  if(btn&&btn.dataset.origText){
+    btn.textContent=btn.dataset.origText;
+    delete btn.dataset.origText;
+    btn.disabled=false;
   }
 
   if(toast){
-    showCopyToast(toast,tf('Batch test complete: {0} available, {1} failed',[String(okCount),String(failCount)]));
+    showCopyToast(toast,finishMsg);
   }
   try{await loadHealth()}catch(_){lhealth(healthD)}
+
+  setTimeout(function(){
+    if(card&&card.classList.contains('finished')){
+      card.style.transition='opacity 0.4s ease';
+      card.style.opacity='0';
+      setTimeout(function(){
+        if(card.classList.contains('finished')){
+          card.style.display='none';
+          card.style.transition='';
+          card.classList.remove('finished');
+        }
+      },400);
+    }
+    if(grpWrap)grpWrap.style.display='none';
+  },3500);
 
   var deadAliases=[];
   proxies.forEach(function(p){
@@ -1655,6 +1818,9 @@ function lhealth(d){
       '<span class="proxy-group-badge '+(g.onlineCount>0?'online':'')+'">'+badgeText+'</span>'+
       '</div>'+
       '<div class="proxy-group-actions" onclick="event.stopPropagation()">'+actionsHtml+'</div>'+
+      '</div>'+
+      '<div class="proxy-group-progress-wrap" id="group-progress-wrap-'+gid+'" style="display:none">'+
+      '<div class="proxy-group-progress-bar" id="group-progress-bar-'+gid+'" style="width:0%"></div>'+
       '</div>'+
       '<div class="proxy-group-cards proxy-grid" id="group-cards-'+gid+'">'+cardsHtml+'</div>'+
       '</div>';

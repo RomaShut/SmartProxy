@@ -59,6 +59,8 @@ type Manager struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	stopOnce      sync.Once
+	stopped       bool
+	wg            sync.WaitGroup
 }
 
 // NewManager creates a Subscription Manager.
@@ -136,9 +138,21 @@ func NewManager(cfgDir string, configs []config.SubscriptionConf, upstreamMgr *u
 
 // Start runs background auto-refresh tasks.
 func (m *Manager) Start() {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.wg.Add(2)
+	m.mu.Unlock()
+
 	// Initial refresh for enabled subscriptions with no nodes
 	safego.Go("subscription.initial_refresh", func() {
+		defer m.wg.Done()
 		for _, name := range m.orderedNames() {
+			if m.ctx.Err() != nil {
+				return
+			}
 			m.mu.RLock()
 			item, exists := m.subs[name]
 			if !exists || !item.Enabled {
@@ -156,6 +170,7 @@ func (m *Manager) Start() {
 
 	// Background ticker loop
 	safego.Go("subscription.ticker", func() {
+		defer m.wg.Done()
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
@@ -165,6 +180,9 @@ func (m *Manager) Start() {
 				return
 			case <-ticker.C:
 				for _, name := range m.orderedNames() {
+					if m.ctx.Err() != nil {
+						return
+					}
 					m.mu.RLock()
 					item, exists := m.subs[name]
 					if !exists || !item.Enabled {
@@ -188,7 +206,12 @@ func (m *Manager) Start() {
 // Stop shuts down the subscription background manager.
 func (m *Manager) Stop() {
 	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		m.stopped = true
+		m.mu.Unlock()
+
 		m.cancel()
+		m.wg.Wait()
 	})
 }
 
@@ -397,15 +420,22 @@ func (m *Manager) Reload(configs []config.SubscriptionConf) {
 
 	// Trigger refresh for enabled subscriptions with no nodes
 	for _, name := range newOrder {
-		m.mu.RLock()
+		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			break
+		}
 		item := m.subs[name]
 		needsFetch := item != nil && item.Enabled && len(item.Nodes) == 0
-		m.mu.RUnlock()
-
 		if needsFetch {
+			m.wg.Add(1)
+			m.mu.Unlock()
 			safego.Go("subscription.reload_refresh", func() {
+				defer m.wg.Done()
 				_, _ = m.Refresh(m.ctx, name)
 			})
+		} else {
+			m.mu.Unlock()
 		}
 	}
 }
@@ -494,7 +524,9 @@ func (m *Manager) recordError(name, errStr string) {
 	if item, ok := m.subs[name]; ok {
 		item.LastError = errStr
 	}
-	m.saveCacheLocked()
+	if !m.stopped {
+		m.saveCacheLocked()
+	}
 }
 
 func (m *Manager) orderedNames() []string {
