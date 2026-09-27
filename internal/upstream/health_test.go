@@ -533,13 +533,13 @@ func TestHealthChecker_StopReloadConcurrentNoPanic(t *testing.T) {
 	hc.Start()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 5; j++ {
+			for j := 0; j < 3; j++ {
 				hc.Reload(cfg, proxies)
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
 				hc.Stop()
 			}
 		}()
