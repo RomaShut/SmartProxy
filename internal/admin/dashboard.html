@@ -103,8 +103,9 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);display:flex
 @media(max-width:340px){.cards-ov{grid-template-columns:1fr}.cards-ov .card-wide{grid-column:span 1}}
 .card-cleanip{grid-column:1/-1;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;justify-content:center;transition:border-color .18s,box-shadow .18s}
 .card-cleanip:hover{border-color:var(--border2);box-shadow:0 4px 16px rgba(0,0,0,.06)}
-.card-cleanip a{display:block;width:100%;max-width:520px;margin:0 auto;text-decoration:none}
-.card-cleanip img{width:100%;height:auto;display:block;border-radius:var(--radius-sm)}
+.card-cleanip a{display:block;width:100%;max-width:720px;margin:0 auto;text-decoration:none}
+.card-cleanip picture{display:block;width:100%}
+.card-cleanip img{width:100%;height:auto;aspect-ratio:720/340;display:block;border-radius:var(--radius-sm)}
 .myip-card{margin-bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .18s,box-shadow .18s}
 .myip-card:hover{border-color:var(--border2);box-shadow:0 4px 16px rgba(0,0,0,.06)}
 .myip-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;cursor:pointer;user-select:none;background:var(--surface);gap:8px;flex-wrap:wrap}
@@ -371,7 +372,13 @@ function tf(s,a){s=t(s);if(a)for(var i=0;i<a.length;i++)s=s.split('{'+i+'}').joi
   <div class="cards-ov" id="dash-cards">
     <div class="card card-cleanip" id="card-cleanip">
       <a href="https://cleanip.io" target="_blank" rel="noopener noreferrer">
-        <img src="https://cleanip.io/c/5PTE.svg" alt="CleanIP Card" loading="lazy">
+        <picture>
+          <source media="(max-width: 359px)" srcset="https://cleanip.io/card.svg?layout=card&theme=random&w=240&stamp=auto">
+          <source media="(max-width: 479px)" srcset="https://cleanip.io/card.svg?layout=card&theme=random&w=360&stamp=auto">
+          <source media="(max-width: 559px)" srcset="https://cleanip.io/card.svg?layout=card&theme=random&w=480&stamp=auto">
+          <source media="(max-width: 719px)" srcset="https://cleanip.io/card.svg?layout=card&theme=random&w=560&stamp=auto">
+          <img src="https://cleanip.io/card.svg?layout=card&theme=random&w=720&stamp=auto" alt="CleanIP Card" loading="lazy">
+        </picture>
       </a>
     </div>
     <div id="dash-metric-cards" style="display:contents"></div>
