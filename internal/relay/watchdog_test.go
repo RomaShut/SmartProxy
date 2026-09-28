@@ -234,7 +234,7 @@ func TestWatchdog_KeepAliveIdle_DoesNotTrigger(t *testing.T) {
 	}
 }
 
-func TestWatchdog_EarlyReset_Triggers(t *testing.T) {
+func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 	clientR, clientW := net.Pipe()
 	defer clientR.Close()
 	defer clientW.Close()
@@ -256,8 +256,9 @@ func TestWatchdog_EarlyReset_Triggers(t *testing.T) {
 		},
 	}
 
-	// Mock remote connection that returns ECONNRESET on Read
-	mockRemote := &errorConn{err: syscall.ECONNRESET}
+	// Mock remote: accept the ClientHello, then answer every Read with ECONNRESET
+	// (GFW injects the reset once it parses the plaintext SNI).
+	mockRemote := &scriptedResetConn{err: syscall.ECONNRESET}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -268,16 +269,174 @@ func TestWatchdog_EarlyReset_Triggers(t *testing.T) {
 		TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
 	}()
 
+	// Client sends ClientHello after relay starts.
+	if _, err := clientW.Write([]byte("GARBAGE_TLS_CLIENT_HELLO")); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
+
 	select {
 	case <-relayDone:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("TCPRelay did not terminate after early reset")
 	}
 
 	if !stalled.Load() {
-		t.Fatal("expected early reset to trigger OnStall, but it did not")
+		t.Fatal("expected reset after a sent request to trigger OnStall, but it did not")
 	}
 
+	stallMu.Lock()
+	defer stallMu.Unlock()
+	if stallReason != "gfw_rst_injected" {
+		t.Fatalf("expected reason 'gfw_rst_injected', got '%s'", stallReason)
+	}
+}
+
+func TestWatchdog_ResetWithNoRequest_DoesNotTrigger(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	var stalled atomic.Bool
+	cfg := WatchdogConfig{
+		Timeout: 100 * time.Millisecond,
+		Host:    "1.1.1.1",
+		Port:    443,
+		Domain:  "speculative-preconnect.example.com",
+		OnStall: func(h string, p int, d, reason string) {
+			stalled.Store(true)
+		},
+	}
+
+	// Remote immediately resets even though the client never sent a request.
+	mockRemote := &errorConn{err: syscall.ECONNRESET}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	go TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
+
+	time.Sleep(200 * time.Millisecond)
+	if stalled.Load() {
+		t.Fatal("RST on a connection that never sent a request must not trigger the watchdog")
+	}
+}
+
+func TestWatchdog_IdleKeepAliveReset_DoesNotTrigger(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	var stalled atomic.Bool
+	cfg := WatchdogConfig{
+		// Timeout is generous on purpose: under whole-package load the response
+		// delivery can be delayed by scheduling. Once the response arrives the
+		// timer is stopped anyway, so only the RSTGraceWindow bounds the test.
+		Timeout:        2 * time.Second,
+		RSTGraceWindow: 200 * time.Millisecond,
+		Host:           "1.1.1.1",
+		Port:           443,
+		Domain:         "api-normal.example.com",
+		OnStall: func(h string, p int, d, reason string) {
+			t.Logf("unexpected OnStall: reason=%s", reason)
+			stalled.Store(true)
+		},
+	}
+
+	// Remote serves one small response, then RSTs only when the test asks for it.
+	mockRemote := &scriptedResetConn{
+		resp:  []byte("HTTP/1.1 200 OK\r\n\r\npong"),
+		reset: make(chan struct{}),
+		err:   syscall.ECONNRESET,
+	}
+	defer mockRemote.Abort()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
+
+	if _, err := clientW.Write([]byte("GET /ping HTTP/1.1\r\n\r\n")); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
+
+	respBuf := make([]byte, 1024)
+	if _, err := clientW.Read(respBuf); err != nil {
+		t.Fatalf("client read response failed: %v", err)
+	}
+
+	// Connection idles past both the watchdog timeout and the RST grace window,
+	// then the server/load-balancer closes the keep-alive socket with a reset.
+	time.Sleep(350 * time.Millisecond)
+	close(mockRemote.reset)
+	time.Sleep(100 * time.Millisecond)
+
+	if stalled.Load() {
+		t.Fatal("idle keep-alive RST (no request recently in flight) must not trigger the watchdog")
+	}
+}
+
+func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	var stalled atomic.Bool
+	var stallReason string
+	var stallMu sync.Mutex
+
+	cfg := WatchdogConfig{
+		Timeout:        2 * time.Second,
+		RSTGraceWindow: 500 * time.Millisecond,
+		Host:           "140.82.116.4",
+		Port:           443,
+		Domain:         "github.com",
+		OnStall: func(h string, p int, d, reason string) {
+			stallMu.Lock()
+			stalled.Store(true)
+			stallReason = reason
+			stallMu.Unlock()
+		},
+	}
+
+	// Remote starts a partial response, then injects a reset shortly after.
+	mockRemote := &scriptedResetConn{
+		resp:  []byte("HTTP/1.1 200 OK\r\n"),
+		reset: make(chan struct{}),
+		err:   syscall.ECONNRESET,
+	}
+	defer mockRemote.Abort()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
+	}()
+
+	if _, err := clientW.Write([]byte("GET / HTTP/1.1\r\n\r\n")); err != nil {
+		t.Fatalf("client write failed: %v", err)
+	}
+
+	respBuf := make([]byte, 1024)
+	if _, err := clientW.Read(respBuf); err != nil {
+		t.Fatalf("client read partial response failed: %v", err)
+	}
+
+	// GFW reset lands after the partial response but inside the grace window.
+	time.Sleep(150 * time.Millisecond)
+	close(mockRemote.reset)
+
+	select {
+	case <-relayDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TCPRelay did not terminate after late reset")
+	}
+
+	if !stalled.Load() {
+		t.Fatal("reset within the grace window after a partial response must trigger the watchdog")
+	}
 	stallMu.Lock()
 	defer stallMu.Unlock()
 	if stallReason != "gfw_rst_injected" {
@@ -318,6 +477,77 @@ func TestWatchdog_ProxyBypassed(t *testing.T) {
 		t.Fatal("watchdog should not trigger for proxy connections")
 	}
 }
+
+// scriptedResetConn models a server: it waits for the client's first Write,
+// optionally delivers one response, and afterwards either returns err on the
+// next Read (reset == nil) or blocks until reset is closed and then returns err.
+type scriptedResetConn struct {
+	resp  []byte
+	reset chan struct{}
+	err   error
+
+	reqOnce   sync.Once
+	requested chan struct{}
+
+	respMu  sync.Mutex
+	respOff int
+
+	abortOnce sync.Once
+	aborted   chan struct{}
+}
+
+func (c *scriptedResetConn) markRequested() {
+	c.reqOnce.Do(func() {
+		c.requested = make(chan struct{})
+		close(c.requested)
+	})
+}
+
+func (c *scriptedResetConn) Write(b []byte) (int, error) {
+	c.markRequested()
+	return len(b), nil
+}
+
+func (c *scriptedResetConn) Read(b []byte) (int, error) {
+	// Block until the client has actually sent a request, mirroring a server
+	// that never RSTs an idle pre-connect on its own.
+	c.reqOnce.Do(func() { c.requested = make(chan struct{}) })
+	<-c.requested
+
+	c.respMu.Lock()
+	if c.resp != nil && c.respOff < len(c.resp) {
+		n := copy(b, c.resp[c.respOff:])
+		c.respOff += n
+		c.respMu.Unlock()
+		return n, nil
+	}
+	c.respMu.Unlock()
+
+	if c.reset == nil {
+		return 0, c.err
+	}
+	select {
+	case <-c.reset:
+		return 0, c.err
+	case <-c.aborted:
+		return 0, net.ErrClosed
+	}
+}
+
+// Abort unblocks a pending Read so the conn never leaks a test goroutine.
+func (c *scriptedResetConn) Abort() {
+	c.abortOnce.Do(func() {
+		c.aborted = make(chan struct{})
+		close(c.aborted)
+	})
+}
+
+func (c *scriptedResetConn) Close() error                       { c.Abort(); return nil }
+func (c *scriptedResetConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
+func (c *scriptedResetConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
+func (c *scriptedResetConn) SetDeadline(t time.Time) error      { return nil }
+func (c *scriptedResetConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *scriptedResetConn) SetWriteDeadline(t time.Time) error { return nil }
 
 type errorConn struct {
 	err error

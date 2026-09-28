@@ -24,6 +24,10 @@ type WatchdogConfig struct {
 	Port    int
 	Domain  string
 	OnStall StallCallback
+	// RSTGraceWindow bounds how long after a response an RST is still attributed
+	// to GFW (an injected reset can arrive a few hundred ms after a partial
+	// response, once inFlight has already cleared). Zero defaults to 3s.
+	RSTGraceWindow time.Duration
 }
 
 // RelayOption configures optional behavior on TCPRelay.
@@ -66,11 +70,18 @@ type watchdogConn struct {
 	clientWritten atomic.Bool
 	totalRemote   atomic.Int64
 	triggerOnce   sync.Once
+
+	// lastInFlight is the unix-nano timestamp of the most recent moment a request
+	// was in flight (set on request Write, refreshed when the response starts).
+	lastInFlight atomic.Int64
 }
 
 func newWatchdogConn(client, remote net.Conn, cfg WatchdogConfig) *watchdogConn {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 2 * time.Second
+	}
+	if cfg.RSTGraceWindow <= 0 {
+		cfg.RSTGraceWindow = 3 * time.Second
 	}
 	w := &watchdogConn{
 		Conn:   remote,
@@ -88,6 +99,7 @@ func (w *watchdogConn) Write(p []byte) (int, error) {
 	if len(p) > 0 && w.state.Load() == int32(watchdogArmed) {
 		w.clientWritten.Store(true)
 		w.inFlight.Store(true)
+		w.lastInFlight.Store(time.Now().UnixNano())
 		// Arm or reset the watchdog timer before writing, so that an immediate
 		// remote response (e.g. on fast links or pipes) does not race with inFlight.
 		w.armTimer(w.cfg.Timeout)
@@ -110,6 +122,9 @@ func (w *watchdogConn) Read(p []byte) (int, error) {
 	}
 	if n > 0 && w.state.Load() == int32(watchdogArmed) {
 		// Remote returned response data! Cancel the watchdog timer immediately.
+		// Refresh lastInFlight first: an injected RST landing just after a partial
+		// response must still fall inside the RST grace window.
+		w.lastInFlight.Store(time.Now().UnixNano())
 		w.inFlight.Store(false)
 		w.stopTimer()
 
@@ -194,8 +209,34 @@ func (w *watchdogConn) handleError(direction string, err error) {
 		return
 	}
 	if isGFWAbort(err) {
+		// Require a real request before attributing the reset. An RST on a
+		// connection that never sent anything (refused pre-connect, server
+		// dropping an idle socket) is an ordinary network event.
+		if !w.clientWritten.Load() {
+			slog.Debug("ignoring RST on connection with no request sent", "error", err)
+			return
+		}
+		// inFlight covers the classic SNI reset (RST before any response). The
+		// grace window additionally covers an injected reset arriving a few
+		// hundred ms after a partial response. Outside both, this is a keep-alive
+		// / load-balancer close during idle — do not learn it.
+		if !w.inFlight.Load() && !w.recentlyInFlight() {
+			slog.Debug("ignoring RST during idle (no request recently in flight)",
+				"error", err, "grace", w.cfg.RSTGraceWindow)
+			return
+		}
 		w.trigger("gfw_rst_injected")
 	}
+}
+
+// recentlyInFlight reports whether a request was awaiting (or had just started
+// receiving a response) within the configured RST grace window.
+func (w *watchdogConn) recentlyInFlight() bool {
+	last := w.lastInFlight.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) <= w.cfg.RSTGraceWindow
 }
 
 func isGFWAbort(err error) bool {
