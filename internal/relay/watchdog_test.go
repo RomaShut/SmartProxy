@@ -635,8 +635,8 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 		t.Fatalf("failed to read client request on remote end: %v", err)
 	}
 
-	// 2. Remote responds with 512 bytes (below DisarmThresholdBytes = 1024)
-	partialResp := make([]byte, 512)
+	// 2. Remote responds with 150 bytes (below DisarmThresholdBytes = 300)
+	partialResp := make([]byte, 150)
 	for i := range partialResp {
 		partialResp[i] = 'A'
 	}
@@ -644,10 +644,10 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 		_, _ = remoteW.Write(partialResp)
 	}()
 
-	// Client reads the 512 bytes
+	// Client reads the 150 bytes
 	readBuf := make([]byte, 4096)
 	totalRead := 0
-	for totalRead < 512 {
+	for totalRead < 150 {
 		nr, rerr := clientW.Read(readBuf)
 		if rerr != nil {
 			t.Fatalf("failed to read partial response on client: %v", rerr)
@@ -682,10 +682,141 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 	if !strings.HasPrefix(stallReason, "gfw_silent_drop_watchdog") {
 		t.Fatalf("expected reason starting with 'gfw_silent_drop_watchdog', got '%s'", stallReason)
 	}
-	if !strings.Contains(stallReason, "512B received < 1KB threshold") {
-		t.Fatalf("expected reason to mention 512B and < 1KB threshold, got '%s'", stallReason)
+	if !strings.Contains(stallReason, "150B received < 300B threshold") {
+		t.Fatalf("expected reason to mention 150B and < 300B threshold, got '%s'", stallReason)
 	}
 	if !strings.Contains(stallReason, "timeout 50ms") {
 		t.Fatalf("expected reason to mention timeout 50ms, got '%s'", stallReason)
+	}
+}
+
+func TestWatchdog_MinimalSite_IpSb_DoesNotStallOnTrailingFrame(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	remoteR, remoteW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+	defer remoteR.Close()
+	defer remoteW.Close()
+
+	var stalled atomic.Bool
+	cfg := WatchdogConfig{
+		Timeout: 50 * time.Millisecond,
+		Host:    "104.26.12.31",
+		Port:    443,
+		Domain:  "ip.sb",
+		OnStall: func(h string, p int, d, reason string) {
+			stalled.Store(true)
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go TCPRelay(ctx, clientR, remoteR, false, nil, WithWatchdog(cfg))
+
+	// 1. Client sends request
+	go func() {
+		_, _ = clientW.Write([]byte("GET / HTTP/2\r\n\r\n"))
+	}()
+
+	buf := make([]byte, 1024)
+	n, err := remoteW.Read(buf)
+	if err != nil || n == 0 {
+		t.Fatalf("remote read request failed: %v", err)
+	}
+
+	// 2. Remote responds with 444 bytes (exactly what ip.sb returned in production)
+	// Since 444B > 300B DisarmThresholdBytes, watchdog disarms immediately.
+	ipSbResp := make([]byte, 444)
+	for i := range ipSbResp {
+		ipSbResp[i] = 'B'
+	}
+	go func() {
+		_, _ = remoteW.Write(ipSbResp)
+	}()
+
+	clientBuf := make([]byte, 4096)
+	totalRead := 0
+	for totalRead < 444 {
+		nr, rerr := clientW.Read(clientBuf)
+		if rerr != nil {
+			t.Fatalf("client read response failed: %v", rerr)
+		}
+		totalRead += nr
+	}
+
+	// 3. Client writes trailing HTTP/2 SETTINGS ACK / WINDOW_UPDATE / FIN frame (e.g. 188 bytes)
+	go func() {
+		_, _ = clientW.Write(make([]byte, 188))
+	}()
+
+	n2, err2 := remoteW.Read(buf)
+	if err2 != nil || n2 == 0 {
+		t.Fatalf("remote read trailing frame failed: %v", err2)
+	}
+
+	// 4. Remote sends nothing back (server does not answer ACK frames).
+	// Sleep for well past watchdog timeout (100ms > 50ms)
+	time.Sleep(100 * time.Millisecond)
+
+	if stalled.Load() {
+		t.Fatal("watchdog falsely triggered on ip.sb trailing frame after receiving 444 bytes (> 300B threshold)!")
+	}
+}
+
+func TestWatchdog_CloseWrite_Disarms(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	remoteR, remoteW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+	defer remoteR.Close()
+	defer remoteW.Close()
+
+	var stalled atomic.Bool
+	cfg := WatchdogConfig{
+		Timeout: 50 * time.Millisecond,
+		Host:    "1.1.1.1",
+		Port:    80,
+		Domain:  "example.com",
+		OnStall: func(h string, p int, d, reason string) {
+			stalled.Store(true)
+		},
+	}
+
+	wc := newWatchdogConn(clientR, remoteR, cfg)
+
+	// 1. Client writes request (100 bytes)
+	go func() {
+		_, _ = wc.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+	}()
+
+	// Remote reads request
+	buf := make([]byte, 1024)
+	n, err := remoteW.Read(buf)
+	if err != nil || n == 0 {
+		t.Fatalf("remote read request failed: %v", err)
+	}
+
+	// 2. Remote responds with 100 bytes (< 300B threshold)
+	go func() {
+		_, _ = remoteW.Write([]byte("HTTP/1.0 200 OK\r\n\r\nhello"))
+	}()
+
+	respBuf := make([]byte, 1024)
+	rn, rerr := wc.Read(respBuf)
+	if rerr != nil || rn == 0 {
+		t.Fatalf("wc.Read failed: %v", rerr)
+	}
+
+	// 3. Client calls CloseWrite() to signal half-close
+	if err := wc.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite failed: %v", err)
+	}
+
+	// 4. Sleep well past watchdog timeout (100ms > 50ms)
+	time.Sleep(100 * time.Millisecond)
+
+	if stalled.Load() {
+		t.Fatal("watchdog should have been disarmed on CloseWrite after receiving remote data!")
 	}
 }

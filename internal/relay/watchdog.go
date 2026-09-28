@@ -16,8 +16,16 @@ import (
 )
 
 // DisarmThresholdBytes is the amount of response data from the remote server required
-// to prove a direct TCP connection healthy and disarm the watchdog (default 1KB).
-const DisarmThresholdBytes int64 = 1 * 1024
+// to prove a direct TCP connection healthy and disarm the watchdog (default 300 bytes).
+const DisarmThresholdBytes int64 = 300
+
+func formatThreshold(bytes int64) string {
+	if bytes >= 1024 && bytes%1024 == 0 {
+		return fmt.Sprintf("%dKB", bytes/1024)
+	}
+	return fmt.Sprintf("%dB", bytes)
+}
+
 
 // StallCallback is invoked when a watchdog detects a silent drop / GFW stall or early reset.
 type StallCallback func(host string, port int, domain, reason string)
@@ -74,6 +82,7 @@ type watchdogConn struct {
 	inFlight      atomic.Bool // true only while a client request is awaiting remote response
 	clientWritten atomic.Bool
 	totalRemote   atomic.Int64
+	roundTrips    atomic.Int32 // counts completed request-response round trips
 	triggerOnce   sync.Once
 
 	// lastInFlight is the unix-nano timestamp of the most recent moment a request
@@ -129,12 +138,15 @@ func (w *watchdogConn) Read(p []byte) (int, error) {
 		// Remote returned response data! Cancel the watchdog timer immediately.
 		// Refresh lastInFlight first: an injected RST landing just after a partial
 		// response must still fall inside the RST grace window.
+		wasInFlight := w.inFlight.Swap(false)
+		if wasInFlight {
+			w.roundTrips.Add(1)
+		}
 		w.lastInFlight.Store(time.Now().UnixNano())
-		w.inFlight.Store(false)
 		w.stopTimer()
 
 		total := w.totalRemote.Add(int64(n))
-		// If total response data exceeds 8KB, stream is proven healthy and fully disarmed.
+		// If total response data exceeds DisarmThresholdBytes (300B), stream is proven healthy and fully disarmed.
 		if total > DisarmThresholdBytes {
 			w.disarm()
 		}
@@ -167,13 +179,14 @@ func (w *watchdogConn) armTimer(d time.Duration) {
 		w.timer = time.AfterFunc(d, func() {
 			if w.inFlight.Load() {
 				remoteBytes := w.totalRemote.Load()
+				threshStr := formatThreshold(DisarmThresholdBytes)
 				var reason, cause string
 				if remoteBytes == 0 {
 					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, 0B received)", w.cfg.Timeout)
 					cause = fmt.Sprintf("in-flight request timed out after %v with 0 bytes received from remote (complete GFW silent drop)", w.cfg.Timeout)
 				} else {
-					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, %dB received < 1KB threshold)", w.cfg.Timeout, remoteBytes)
-					cause = fmt.Sprintf("in-flight request timed out after %v: remote returned %d bytes (< 1KB disarm threshold %d B), subsequent response stalled", w.cfg.Timeout, remoteBytes, DisarmThresholdBytes)
+					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, %dB received < %s threshold)", w.cfg.Timeout, remoteBytes, threshStr)
+					cause = fmt.Sprintf("in-flight request timed out after %v: remote returned %d bytes (< %s disarm threshold %d B), subsequent response stalled", w.cfg.Timeout, remoteBytes, threshStr, DisarmThresholdBytes)
 				}
 				w.trigger(reason, cause)
 			}
@@ -198,6 +211,7 @@ func (w *watchdogConn) trigger(reason, cause string) {
 			"domain", w.cfg.Domain,
 			"remote_bytes", remoteBytes,
 			"disarm_threshold_bytes", DisarmThresholdBytes,
+			"round_trips", w.roundTrips.Load(),
 			"client_written", w.clientWritten.Load(),
 			"in_flight", w.inFlight.Load(),
 			"timeout", w.cfg.Timeout,
@@ -235,6 +249,7 @@ func (w *watchdogConn) handleError(direction string, err error) {
 			return
 		}
 		remoteBytes := w.totalRemote.Load()
+		threshStr := formatThreshold(DisarmThresholdBytes)
 		if w.inFlight.Load() {
 			cause := fmt.Sprintf("remote connection reset/aborted (%v) while request was in-flight (%d bytes received from remote)", err, remoteBytes)
 			reason := fmt.Sprintf("gfw_rst_injected (%v while request in-flight, %dB received)", err, remoteBytes)
@@ -242,7 +257,7 @@ func (w *watchdogConn) handleError(direction string, err error) {
 			return
 		}
 		if w.recentlyInFlight() {
-			cause := fmt.Sprintf("remote connection reset/aborted (%v) within %v grace window after receiving %d bytes (< 1KB threshold)", err, w.cfg.RSTGraceWindow, remoteBytes)
+			cause := fmt.Sprintf("remote connection reset/aborted (%v) within %v grace window after receiving %d bytes (< %s threshold)", err, w.cfg.RSTGraceWindow, remoteBytes, threshStr)
 			reason := fmt.Sprintf("gfw_rst_injected (%v within %v grace window, %dB received)", err, w.cfg.RSTGraceWindow, remoteBytes)
 			w.trigger(reason, cause)
 			return
@@ -287,6 +302,12 @@ func (w *watchdogConn) Close() error {
 }
 
 func (w *watchdogConn) CloseWrite() error {
+	// If client is half-closing the write stream, client has finished sending data.
+	// If remote already delivered response data or completed a round-trip, this was
+	// a successful exchange; disarm watchdog to prevent trailing timeouts on teardown.
+	if w.totalRemote.Load() > 0 || w.roundTrips.Load() > 0 {
+		w.disarm()
+	}
 	if cw, ok := w.Conn.(closeWriter); ok {
 		return cw.CloseWrite()
 	}
@@ -294,6 +315,7 @@ func (w *watchdogConn) CloseWrite() error {
 }
 
 func (w *watchdogConn) CloseRead() error {
+	w.stopTimer()
 	if cr, ok := w.Conn.(closeReader); ok {
 		return cr.CloseRead()
 	}
