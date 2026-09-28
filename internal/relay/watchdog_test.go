@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -70,8 +71,11 @@ func TestWatchdog_Stall_TriggersRSTAndBlacklist(t *testing.T) {
 
 	stallMu.Lock()
 	defer stallMu.Unlock()
-	if stallReason != "gfw_silent_drop_watchdog" {
-		t.Fatalf("expected reason 'gfw_silent_drop_watchdog', got '%s'", stallReason)
+	if !strings.HasPrefix(stallReason, "gfw_silent_drop_watchdog") {
+		t.Fatalf("expected reason starting with 'gfw_silent_drop_watchdog', got '%s'", stallReason)
+	}
+	if !strings.Contains(stallReason, "0B received") || !strings.Contains(stallReason, "timeout 50ms") {
+		t.Fatalf("expected reason to contain timeout and 0B received, got '%s'", stallReason)
 	}
 
 	// Verify clientW got closed/reset
@@ -290,8 +294,8 @@ func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 
 	stallMu.Lock()
 	defer stallMu.Unlock()
-	if stallReason != "gfw_rst_injected" {
-		t.Fatalf("expected reason 'gfw_rst_injected', got '%s'", stallReason)
+	if !strings.HasPrefix(stallReason, "gfw_rst_injected") {
+		t.Fatalf("expected reason starting with 'gfw_rst_injected', got '%s'", stallReason)
 	}
 }
 
@@ -453,8 +457,8 @@ func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
 	}
 	stallMu.Lock()
 	defer stallMu.Unlock()
-	if stallReason != "gfw_rst_injected" {
-		t.Fatalf("expected reason 'gfw_rst_injected', got '%s'", stallReason)
+	if !strings.HasPrefix(stallReason, "gfw_rst_injected") {
+		t.Fatalf("expected reason starting with 'gfw_rst_injected', got '%s'", stallReason)
 	}
 }
 
@@ -588,3 +592,100 @@ func (e *errorConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} 
 func (e *errorConn) SetDeadline(t time.Time) error      { return nil }
 func (e *errorConn) SetReadDeadline(t time.Time) error  { return nil }
 func (e *errorConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
+	clientR, clientW := net.Pipe()
+	remoteR, remoteW := net.Pipe()
+	defer clientR.Close()
+	defer clientW.Close()
+	defer remoteR.Close()
+	defer remoteW.Close()
+
+	var stalled atomic.Bool
+	var stallMu sync.Mutex
+	var stallReason string
+	cfg := WatchdogConfig{
+		Timeout: 50 * time.Millisecond,
+		Host:    "172.67.74.183",
+		Port:    443,
+		Domain:  "stat.ip.sb",
+		OnStall: func(h string, p int, d, reason string) {
+			stalled.Store(true)
+			stallMu.Lock()
+			stallReason = reason
+			stallMu.Unlock()
+		},
+	}
+
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		TCPRelay(context.Background(), clientR, remoteR, false, nil, WithWatchdog(cfg))
+	}()
+
+	// 1. Client sends initial request (e.g. TLS ClientHello)
+	go func() {
+		_, _ = clientW.Write([]byte("client-hello"))
+	}()
+
+	// Read on remote side
+	buf := make([]byte, 1024)
+	n, err := remoteW.Read(buf)
+	if err != nil || n == 0 {
+		t.Fatalf("failed to read client request on remote end: %v", err)
+	}
+
+	// 2. Remote responds with 3781 bytes (below DisarmThresholdBytes = 8192)
+	partialResp := make([]byte, 3781)
+	for i := range partialResp {
+		partialResp[i] = 'A'
+	}
+	go func() {
+		_, _ = remoteW.Write(partialResp)
+	}()
+
+	// Client reads the 3781 bytes
+	readBuf := make([]byte, 4096)
+	totalRead := 0
+	for totalRead < 3781 {
+		nr, rerr := clientW.Read(readBuf)
+		if rerr != nil {
+			t.Fatalf("failed to read partial response on client: %v", rerr)
+		}
+		totalRead += nr
+	}
+
+	// 3. Client sends another request (e.g. HTTP GET / event payload)
+	go func() {
+		_, _ = clientW.Write([]byte("GET /event HTTP/1.1\r\n\r\n"))
+	}()
+
+	n2, err2 := remoteW.Read(buf)
+	if err2 != nil || n2 == 0 {
+		t.Fatalf("failed to read second client request: %v", err2)
+	}
+
+	// 4. Remote now stalls! Does not send any more data.
+	// Watchdog timeout (50ms) should trigger!
+	select {
+	case <-relayDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("TCPRelay did not terminate after watchdog timeout on partial response stall")
+	}
+
+	if !stalled.Load() {
+		t.Fatal("expected OnStall callback to be invoked for partial response stall below threshold")
+	}
+
+	stallMu.Lock()
+	defer stallMu.Unlock()
+	if !strings.HasPrefix(stallReason, "gfw_silent_drop_watchdog") {
+		t.Fatalf("expected reason starting with 'gfw_silent_drop_watchdog', got '%s'", stallReason)
+	}
+	if !strings.Contains(stallReason, "3781B received < 8KB threshold") {
+		t.Fatalf("expected reason to mention 3781B and < 8KB threshold, got '%s'", stallReason)
+	}
+	if !strings.Contains(stallReason, "timeout 50ms") {
+		t.Fatalf("expected reason to mention timeout 50ms, got '%s'", stallReason)
+	}
+}

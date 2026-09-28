@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -13,6 +14,10 @@ import (
 
 	"smartproxy/internal/netutil"
 )
+
+// DisarmThresholdBytes is the amount of response data from the remote server required
+// to prove a direct TCP connection healthy and disarm the watchdog (default 8KB).
+const DisarmThresholdBytes int64 = 8 * 1024
 
 // StallCallback is invoked when a watchdog detects a silent drop / GFW stall or early reset.
 type StallCallback func(host string, port int, domain, reason string)
@@ -130,7 +135,7 @@ func (w *watchdogConn) Read(p []byte) (int, error) {
 
 		total := w.totalRemote.Add(int64(n))
 		// If total response data exceeds 8KB, stream is proven healthy and fully disarmed.
-		if total > 8*1024 {
+		if total > DisarmThresholdBytes {
 			w.disarm()
 		}
 	}
@@ -161,7 +166,16 @@ func (w *watchdogConn) armTimer(d time.Duration) {
 	if w.timer == nil {
 		w.timer = time.AfterFunc(d, func() {
 			if w.inFlight.Load() {
-				w.trigger("gfw_silent_drop_watchdog")
+				remoteBytes := w.totalRemote.Load()
+				var reason, cause string
+				if remoteBytes == 0 {
+					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, 0B received)", w.cfg.Timeout)
+					cause = fmt.Sprintf("in-flight request timed out after %v with 0 bytes received from remote (complete GFW silent drop)", w.cfg.Timeout)
+				} else {
+					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, %dB received < 8KB threshold)", w.cfg.Timeout, remoteBytes)
+					cause = fmt.Sprintf("in-flight request timed out after %v: remote returned %d bytes (< 8KB disarm threshold %d B), subsequent response stalled", w.cfg.Timeout, remoteBytes, DisarmThresholdBytes)
+				}
+				w.trigger(reason, cause)
 			}
 		})
 	} else {
@@ -170,18 +184,22 @@ func (w *watchdogConn) armTimer(d time.Duration) {
 	}
 }
 
-func (w *watchdogConn) trigger(reason string) {
+func (w *watchdogConn) trigger(reason, cause string) {
 	w.triggerOnce.Do(func() {
 		w.state.Store(int32(watchdogTriggered))
 		w.stopTimer()
 
+		remoteBytes := w.totalRemote.Load()
 		slog.Warn("watchdog detected GFW stall/abort on direct connection",
 			"reason", reason,
+			"cause", cause,
 			"host", w.cfg.Host,
 			"port", w.cfg.Port,
 			"domain", w.cfg.Domain,
-			"remote_bytes", w.totalRemote.Load(),
+			"remote_bytes", remoteBytes,
+			"disarm_threshold_bytes", DisarmThresholdBytes,
 			"client_written", w.clientWritten.Load(),
+			"in_flight", w.inFlight.Load(),
 			"timeout", w.cfg.Timeout,
 		)
 
@@ -216,16 +234,22 @@ func (w *watchdogConn) handleError(direction string, err error) {
 			slog.Debug("ignoring RST on connection with no request sent", "error", err)
 			return
 		}
-		// inFlight covers the classic SNI reset (RST before any response). The
-		// grace window additionally covers an injected reset arriving a few
-		// hundred ms after a partial response. Outside both, this is a keep-alive
-		// / load-balancer close during idle — do not learn it.
-		if !w.inFlight.Load() && !w.recentlyInFlight() {
-			slog.Debug("ignoring RST during idle (no request recently in flight)",
-				"error", err, "grace", w.cfg.RSTGraceWindow)
+		remoteBytes := w.totalRemote.Load()
+		if w.inFlight.Load() {
+			cause := fmt.Sprintf("remote connection reset/aborted (%v) while request was in-flight (%d bytes received from remote)", err, remoteBytes)
+			reason := fmt.Sprintf("gfw_rst_injected (%v while request in-flight, %dB received)", err, remoteBytes)
+			w.trigger(reason, cause)
 			return
 		}
-		w.trigger("gfw_rst_injected")
+		if w.recentlyInFlight() {
+			cause := fmt.Sprintf("remote connection reset/aborted (%v) within %v grace window after receiving %d bytes (< 8KB threshold)", err, w.cfg.RSTGraceWindow, remoteBytes)
+			reason := fmt.Sprintf("gfw_rst_injected (%v within %v grace window, %dB received)", err, w.cfg.RSTGraceWindow, remoteBytes)
+			w.trigger(reason, cause)
+			return
+		}
+		// Outside both, this is a keep-alive / load-balancer close during idle — do not learn it.
+		slog.Debug("ignoring RST during idle (no request recently in flight)",
+			"error", err, "grace", w.cfg.RSTGraceWindow)
 	}
 }
 
