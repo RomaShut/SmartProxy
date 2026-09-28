@@ -178,6 +178,16 @@ func (w *watchdogConn) armTimer(d time.Duration) {
 	if w.timer == nil {
 		w.timer = time.AfterFunc(d, func() {
 			if w.inFlight.Load() {
+				// If remote has ALREADY returned response data (e.g. 237B HTTP 304, 444B ip.sb),
+				// the connection is proven reachable and healthy. A timeout on a subsequent
+				// client write is simply an unacknowledged control frame (e.g. HTTP/2 SETTINGS
+				// ACK 188B, WINDOW_UPDATE) or keep-alive packet where the server does not reply.
+				// We MUST disarm instead of falsely accusing GFW of silent dropping!
+				if w.totalRemote.Load() > 0 || w.roundTrips.Load() > 0 {
+					w.disarm()
+					return
+				}
+
 				remoteBytes := w.totalRemote.Load()
 				threshStr := formatThreshold(DisarmThresholdBytes)
 				var reason, cause string

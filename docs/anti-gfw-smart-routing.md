@@ -185,11 +185,10 @@ type DomainHealthProfile struct {
 * **一票降级、看门狗掐断与 ACL 自动固化（已落地实现）**：
   * 在 `internal/relay/watchdog.go` 中实现 `relay.WithWatchdog`。对于智能直连通道（`!isProxy`），看门狗监控客户端首个请求发出后的回包状态。
   * 若在看门狗超时时间（默认 **2 秒**，支持 `smart_proxy.watchdog_timeout_ms` 配置）内未收到远端有效应用层回包，或在握手/首请求早期捕获到 `ECONNRESET` / `broken pipe`：
-    1. 立即将对应 `domain` 与 `host` 记入动态黑名单（TTL 3600s）。
-    2. **自动固化追加至 `acl.txt`**（通过 `rules.AppendProxyRule` 写入 `proxy domain <d> default`，去重不膨胀，fsnotify 自动热重载，重启永久生效）。
-    3. 主动向客户端发送真实 **TCP RST**（通过 `netutil.ResetConn(client)` 与 `SO_LINGER=0`）。
-    4. 客户端（浏览器、curl、git）在 2 秒内收到 RST 快速失败，现代浏览器与 CLI 立即触发重试；重试连接命中动态黑名单与 ACL 规则，毫秒级直接切入代理通道成功访问！
-* **无需重启、无需配置**：系统完全通过对网络底层行为的观察自主学习，无需维护庞大的静态规则文件。
+    1. 立即将对应 `domain` 与 `host` 记入动态黑名单（TTL 3600s），自动快速自愈，不污染磁盘上的自定义规则文件。
+    2. 主动向客户端发送真实 **TCP RST**（通过 `netutil.ResetConn(client)` 与 `SO_LINGER=0`）。
+    3. 客户端（浏览器、curl、git）在 2 秒内收到 RST 快速失败，现代浏览器与 CLI 立即触发重试；重试连接命中动态黑名单，毫秒级直接切入代理通道成功访问！
+* **无需重启、自愈免维护**：系统完全通过对网络底层行为的观察自主学习，动态黑名单超时自动过期，兼顾无感自愈与瞬时防死。
 
 ---
 
@@ -242,9 +241,9 @@ sequenceDiagram
 ## §5 结论与演进路线总结
 
 1. **第一阶段（已实施）**：在 `acl.txt` 中收录 GitHub、Google 等高频受干扰海外节点走 `default` 代理，并实施 DNS 规则旁路，保障当前静态规则的最优体验。
-2. **第二阶段（本次已实施）**：落地了**中继早衰看门狗与 TCP RST 快速恢复 + 规则自动固化机制**（`relay.WithWatchdog` + `rules.AppendProxyRule`）：
+2. **第二阶段（本次已实施）**：落地了**中继早衰看门狗与 TCP RST 快速恢复 + 动态自愈黑名单机制**（`relay.WithWatchdog` + 1 小时内存动态黑名单）：
    * 对智能直连通道在首请求阶段设置 2 秒（可配置）看门狗；
-   * 一旦发生 GFW 静默黑洞丢包或早期 RST，看门狗毫秒级发出 TCP RST 掐断客户端，拉入黑名单并固化至 `acl.txt`，彻底消除 90 秒假死现象；
-   * 客户端重试时命中黑名单/ACL，直接无缝走代理。
+   * 一旦发生 GFW 静默黑洞丢包或早期 RST，看门狗毫秒级发出 TCP RST 掐断客户端，拉入动态黑名单，彻底消除 90 秒假死现象；
+   * 客户端重试时命中动态黑名单，直接无缝走代理；且不向磁盘写入永久规则，保障网络自愈能力。
 3. **第三阶段（后续演进）**：推进 `speculativeDial`（Happy Eyeballs 50ms 对冲双拨号），在客户端发起连接的第一时间通过轻量缓冲实现无感透明自动切换。
 

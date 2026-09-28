@@ -593,7 +593,7 @@ func (e *errorConn) SetDeadline(t time.Time) error      { return nil }
 func (e *errorConn) SetReadDeadline(t time.Time) error  { return nil }
 func (e *errorConn) SetWriteDeadline(t time.Time) error { return nil }
 
-func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
+func TestWatchdog_MinimalSite_304NotModified_DoesNotStallOnTrailingFrame(t *testing.T) {
 	clientR, clientW := net.Pipe()
 	remoteR, remoteW := net.Pipe()
 	defer clientR.Close()
@@ -602,91 +602,67 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 	defer remoteW.Close()
 
 	var stalled atomic.Bool
-	var stallMu sync.Mutex
-	var stallReason string
 	cfg := WatchdogConfig{
 		Timeout: 50 * time.Millisecond,
-		Host:    "172.67.74.183",
+		Host:    "3.169.231.7",
 		Port:    443,
-		Domain:  "stat.ip.sb",
+		Domain:  "firefoxusercontent.com",
 		OnStall: func(h string, p int, d, reason string) {
 			stalled.Store(true)
-			stallMu.Lock()
-			stallReason = reason
-			stallMu.Unlock()
 		},
 	}
 
-	relayDone := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go TCPRelay(ctx, clientR, remoteR, false, nil, WithWatchdog(cfg))
+
+	// 1. Client sends request (e.g. HTTP GET with If-None-Match)
 	go func() {
-		defer close(relayDone)
-		TCPRelay(context.Background(), clientR, remoteR, false, nil, WithWatchdog(cfg))
+		_, _ = clientW.Write([]byte("GET /avatar.png HTTP/2\r\nIf-None-Match: \"xyz\"\r\n\r\n"))
 	}()
 
-	// 1. Client sends initial request (e.g. TLS ClientHello)
-	go func() {
-		_, _ = clientW.Write([]byte("client-hello"))
-	}()
-
-	// Read on remote side
 	buf := make([]byte, 1024)
 	n, err := remoteW.Read(buf)
 	if err != nil || n == 0 {
-		t.Fatalf("failed to read client request on remote end: %v", err)
+		t.Fatalf("remote read request failed: %v", err)
 	}
 
-	// 2. Remote responds with 150 bytes (below DisarmThresholdBytes = 300)
-	partialResp := make([]byte, 150)
-	for i := range partialResp {
-		partialResp[i] = 'A'
+	// 2. Remote responds with 237 bytes (HTTP 304 Not Modified, exactly what firefoxusercontent.com returned)
+	resp304 := make([]byte, 237)
+	for i := range resp304 {
+		resp304[i] = 'A'
 	}
 	go func() {
-		_, _ = remoteW.Write(partialResp)
+		_, _ = remoteW.Write(resp304)
 	}()
 
-	// Client reads the 150 bytes
-	readBuf := make([]byte, 4096)
+	clientBuf := make([]byte, 4096)
 	totalRead := 0
-	for totalRead < 150 {
-		nr, rerr := clientW.Read(readBuf)
+	for totalRead < 237 {
+		nr, rerr := clientW.Read(clientBuf)
 		if rerr != nil {
-			t.Fatalf("failed to read partial response on client: %v", rerr)
+			t.Fatalf("client read response failed: %v", rerr)
 		}
 		totalRead += nr
 	}
 
-	// 3. Client sends another request (e.g. HTTP GET / event payload)
+	// 3. Client writes trailing HTTP/2 SETTINGS ACK (188 bytes)
 	go func() {
-		_, _ = clientW.Write([]byte("GET /event HTTP/1.1\r\n\r\n"))
+		_, _ = clientW.Write(make([]byte, 188))
 	}()
 
 	n2, err2 := remoteW.Read(buf)
 	if err2 != nil || n2 == 0 {
-		t.Fatalf("failed to read second client request: %v", err2)
+		t.Fatalf("remote read trailing frame failed: %v", err2)
 	}
 
-	// 4. Remote now stalls! Does not send any more data.
-	// Watchdog timeout (50ms) should trigger!
-	select {
-	case <-relayDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("TCPRelay did not terminate after watchdog timeout on partial response stall")
-	}
+	// 4. Remote sends nothing back (server does not answer ACK frames).
+	// Sleep for well past watchdog timeout (100ms > 50ms)
+	time.Sleep(100 * time.Millisecond)
 
-	if !stalled.Load() {
-		t.Fatal("expected OnStall callback to be invoked for partial response stall below threshold")
-	}
-
-	stallMu.Lock()
-	defer stallMu.Unlock()
-	if !strings.HasPrefix(stallReason, "gfw_silent_drop_watchdog") {
-		t.Fatalf("expected reason starting with 'gfw_silent_drop_watchdog', got '%s'", stallReason)
-	}
-	if !strings.Contains(stallReason, "150B received < 300B threshold") {
-		t.Fatalf("expected reason to mention 150B and < 300B threshold, got '%s'", stallReason)
-	}
-	if !strings.Contains(stallReason, "timeout 50ms") {
-		t.Fatalf("expected reason to mention timeout 50ms, got '%s'", stallReason)
+	if stalled.Load() {
+		t.Fatal("watchdog falsely triggered on firefoxusercontent.com trailing frame after receiving 237 bytes!")
 	}
 }
 

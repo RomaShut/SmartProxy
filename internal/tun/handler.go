@@ -398,10 +398,6 @@ func (h *TUNHandler) handleSmartConnect(ctx context.Context, conn net.Conn, host
 
 	var relayOpts []relay.RelayOption
 	if !isProxy {
-		aclFile := ""
-		if cfg := h.config.Load(); cfg != nil {
-			aclFile = cfg.Routing.ACLFile
-		}
 		relayOpts = append(relayOpts, relay.WithWatchdog(relay.WatchdogConfig{
 			Timeout: h.router.WatchdogTimeout(),
 			Host:    host,
@@ -409,11 +405,6 @@ func (h *TUNHandler) handleSmartConnect(ctx context.Context, conn net.Conn, host
 			Domain:  domain,
 			OnStall: func(hStr string, p int, d, reason string) {
 				h.router.AddToBlacklist(hStr, p, d, reason)
-				if aclFile != "" {
-					if err := rules.AppendProxyRule(aclFile, hStr, d, "default"); err != nil {
-						ll.Warn("failed to persist proxy rule to acl file", "error", err, "path", aclFile)
-					}
-				}
 			},
 		}))
 	}
