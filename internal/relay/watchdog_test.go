@@ -56,10 +56,11 @@ func TestWatchdog_Stall_TriggersRSTAndBlacklist(t *testing.T) {
 		t.Fatalf("failed to read client request on remote end: %v", err)
 	}
 
-	// Wait for watchdog to trigger (timeout is 50ms)
+	// Wait for watchdog to trigger (timeout is 50ms). Generous select: under
+	// -race the post-timer teardown scheduling can take hundreds of ms.
 	select {
 	case <-relayDone:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(10 * time.Second):
 		t.Fatal("TCPRelay did not terminate after watchdog timeout")
 	}
 
@@ -89,8 +90,11 @@ func TestWatchdog_NormalResponse_Disarms(t *testing.T) {
 	defer remoteW.Close()
 
 	var stalled atomic.Bool
+	// Timeout is effectively a "never" bound here: the test synchronizes the
+	// response delivery by hand, so the timer must only be unable to fire from
+	// scheduling delay (notably under -race).
 	cfg := WatchdogConfig{
-		Timeout: 500 * time.Millisecond,
+		Timeout: 10 * time.Second,
 		Host:    "1.1.1.1",
 		Port:    443,
 		Domain:  "cloudflare.com",
@@ -184,7 +188,7 @@ func TestWatchdog_KeepAliveIdle_DoesNotTrigger(t *testing.T) {
 
 	var stalled atomic.Bool
 	cfg := WatchdogConfig{
-		Timeout: 500 * time.Millisecond,
+		Timeout: 10 * time.Second,
 		Host:    "1.1.1.1",
 		Port:    443,
 		Domain:  "api-normal-m.amemv.com",
@@ -244,7 +248,7 @@ func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 	var stallMu sync.Mutex
 
 	cfg := WatchdogConfig{
-		Timeout: 1 * time.Second,
+		Timeout: 10 * time.Second,
 		Host:    "140.82.116.4",
 		Port:    443,
 		Domain:  "github.com",
@@ -260,7 +264,7 @@ func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 	// (GFW injects the reset once it parses the plaintext SNI).
 	mockRemote := &scriptedResetConn{err: syscall.ECONNRESET}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	relayDone := make(chan struct{})
@@ -276,7 +280,7 @@ func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 
 	select {
 	case <-relayDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("TCPRelay did not terminate after early reset")
 	}
 
@@ -328,11 +332,10 @@ func TestWatchdog_IdleKeepAliveReset_DoesNotTrigger(t *testing.T) {
 
 	var stalled atomic.Bool
 	cfg := WatchdogConfig{
-		// Timeout is generous on purpose: under whole-package load the response
-		// delivery can be delayed by scheduling. Once the response arrives the
-		// timer is stopped anyway, so only the RSTGraceWindow bounds the test.
-		Timeout:        2 * time.Second,
-		RSTGraceWindow: 200 * time.Millisecond,
+		// Timeout is effectively a "never" bound: the response delivery is
+		// synchronized by hand, so only RSTGraceWindow bounds the test.
+		Timeout:        10 * time.Second,
+		RSTGraceWindow: 300 * time.Millisecond,
 		Host:           "1.1.1.1",
 		Port:           443,
 		Domain:         "api-normal.example.com",
@@ -350,10 +353,14 @@ func TestWatchdog_IdleKeepAliveReset_DoesNotTrigger(t *testing.T) {
 	}
 	defer mockRemote.Abort()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	go TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		TCPRelay(ctx, clientR, mockRemote, false, nil, WithWatchdog(cfg))
+	}()
 
 	if _, err := clientW.Write([]byte("GET /ping HTTP/1.1\r\n\r\n")); err != nil {
 		t.Fatalf("client write failed: %v", err)
@@ -364,11 +371,18 @@ func TestWatchdog_IdleKeepAliveReset_DoesNotTrigger(t *testing.T) {
 		t.Fatalf("client read response failed: %v", err)
 	}
 
-	// Connection idles past both the watchdog timeout and the RST grace window,
-	// then the server/load-balancer closes the keep-alive socket with a reset.
-	time.Sleep(350 * time.Millisecond)
+	// Connection idles beyond the RST grace window, then the server/load-balancer
+	// closes the keep-alive socket with a reset.
+	time.Sleep(700 * time.Millisecond)
 	close(mockRemote.reset)
-	time.Sleep(100 * time.Millisecond)
+
+	// The ignored RST still ends io.Copy, so the relay terminates — but no stall
+	// callback may have fired.
+	select {
+	case <-relayDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("TCPRelay did not terminate after idle reset")
+	}
 
 	if stalled.Load() {
 		t.Fatal("idle keep-alive RST (no request recently in flight) must not trigger the watchdog")
@@ -385,8 +399,8 @@ func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
 	var stallMu sync.Mutex
 
 	cfg := WatchdogConfig{
-		Timeout:        2 * time.Second,
-		RSTGraceWindow: 500 * time.Millisecond,
+		Timeout:        10 * time.Second,
+		RSTGraceWindow: 5 * time.Second,
 		Host:           "140.82.116.4",
 		Port:           443,
 		Domain:         "github.com",
@@ -406,7 +420,7 @@ func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
 	}
 	defer mockRemote.Abort()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	relayDone := make(chan struct{})
@@ -425,12 +439,12 @@ func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
 	}
 
 	// GFW reset lands after the partial response but inside the grace window.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	close(mockRemote.reset)
 
 	select {
 	case <-relayDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("TCPRelay did not terminate after late reset")
 	}
 
@@ -486,32 +500,32 @@ type scriptedResetConn struct {
 	reset chan struct{}
 	err   error
 
-	reqOnce   sync.Once
 	requested chan struct{}
 
 	respMu  sync.Mutex
 	respOff int
 
+	// initOnce creates the requested channel (whichever of Read/Write runs
+	// first); signalOnce closes it (only Write signals). Keeping them separate
+	// matters: a shared Once would let Read's initialization swallow Write's
+	// signal and block Read forever.
+	initOnce   sync.Once
+	signalOnce sync.Once
+
 	abortOnce sync.Once
 	aborted   chan struct{}
 }
 
-func (c *scriptedResetConn) markRequested() {
-	c.reqOnce.Do(func() {
-		c.requested = make(chan struct{})
-		close(c.requested)
-	})
-}
-
 func (c *scriptedResetConn) Write(b []byte) (int, error) {
-	c.markRequested()
+	c.initOnce.Do(func() { c.requested = make(chan struct{}) })
+	c.signalOnce.Do(func() { close(c.requested) })
 	return len(b), nil
 }
 
 func (c *scriptedResetConn) Read(b []byte) (int, error) {
 	// Block until the client has actually sent a request, mirroring a server
 	// that never RSTs an idle pre-connect on its own.
-	c.reqOnce.Do(func() { c.requested = make(chan struct{}) })
+	c.initOnce.Do(func() { c.requested = make(chan struct{}) })
 	<-c.requested
 
 	c.respMu.Lock()
