@@ -262,7 +262,7 @@ func TestWatchdog_EarlyResetAfterRequest_Triggers(t *testing.T) {
 
 	// Mock remote: accept the ClientHello, then answer every Read with ECONNRESET
 	// (GFW injects the reset once it parses the plaintext SNI).
-	mockRemote := &scriptedResetConn{err: syscall.ECONNRESET}
+	mockRemote := newScriptedResetConn(nil, nil, syscall.ECONNRESET)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -346,11 +346,11 @@ func TestWatchdog_IdleKeepAliveReset_DoesNotTrigger(t *testing.T) {
 	}
 
 	// Remote serves one small response, then RSTs only when the test asks for it.
-	mockRemote := &scriptedResetConn{
-		resp:  []byte("HTTP/1.1 200 OK\r\n\r\npong"),
-		reset: make(chan struct{}),
-		err:   syscall.ECONNRESET,
-	}
+	mockRemote := newScriptedResetConn(
+		[]byte("HTTP/1.1 200 OK\r\n\r\npong"),
+		make(chan struct{}),
+		syscall.ECONNRESET,
+	)
 	defer mockRemote.Abort()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -413,11 +413,11 @@ func TestWatchdog_LateResetWithinGrace_Triggers(t *testing.T) {
 	}
 
 	// Remote starts a partial response, then injects a reset shortly after.
-	mockRemote := &scriptedResetConn{
-		resp:  []byte("HTTP/1.1 200 OK\r\n"),
-		reset: make(chan struct{}),
-		err:   syscall.ECONNRESET,
-	}
+	mockRemote := newScriptedResetConn(
+		[]byte("HTTP/1.1 200 OK\r\n"),
+		make(chan struct{}),
+		syscall.ECONNRESET,
+	)
 	defer mockRemote.Abort()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -513,7 +513,21 @@ type scriptedResetConn struct {
 	signalOnce sync.Once
 
 	abortOnce sync.Once
-	aborted   chan struct{}
+	// aborted is created eagerly in newScriptedResetConn so Abort only ever
+	// closes it — never writes the field while Read's select reads it.
+	aborted chan struct{}
+}
+
+// newScriptedResetConn must be used to build the mock: all channels (including
+// aborted) exist before any goroutine starts, so no channel field is ever
+// written concurrently with a Read/Write.
+func newScriptedResetConn(resp []byte, reset chan struct{}, err error) *scriptedResetConn {
+	return &scriptedResetConn{
+		resp:    resp,
+		reset:   reset,
+		err:     err,
+		aborted: make(chan struct{}),
+	}
 }
 
 func (c *scriptedResetConn) Write(b []byte) (int, error) {
@@ -549,11 +563,10 @@ func (c *scriptedResetConn) Read(b []byte) (int, error) {
 }
 
 // Abort unblocks a pending Read so the conn never leaks a test goroutine.
+// The channel already exists, so this is a close-only operation — safe even
+// while another goroutine is parked selecting on it.
 func (c *scriptedResetConn) Abort() {
-	c.abortOnce.Do(func() {
-		c.aborted = make(chan struct{})
-		close(c.aborted)
-	})
+	c.abortOnce.Do(func() { close(c.aborted) })
 }
 
 func (c *scriptedResetConn) Close() error                       { c.Abort(); return nil }
