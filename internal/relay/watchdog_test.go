@@ -635,8 +635,8 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 		t.Fatalf("failed to read client request on remote end: %v", err)
 	}
 
-	// 2. Remote responds with 3781 bytes (below DisarmThresholdBytes = 8192)
-	partialResp := make([]byte, 3781)
+	// 2. Remote responds with 512 bytes (below DisarmThresholdBytes = 1024)
+	partialResp := make([]byte, 512)
 	for i := range partialResp {
 		partialResp[i] = 'A'
 	}
@@ -644,10 +644,10 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 		_, _ = remoteW.Write(partialResp)
 	}()
 
-	// Client reads the 3781 bytes
+	// Client reads the 512 bytes
 	readBuf := make([]byte, 4096)
 	totalRead := 0
-	for totalRead < 3781 {
+	for totalRead < 512 {
 		nr, rerr := clientW.Read(readBuf)
 		if rerr != nil {
 			t.Fatalf("failed to read partial response on client: %v", rerr)
@@ -682,8 +682,8 @@ func TestWatchdog_PartialResponse_BelowThreshold_TriggersOnStall(t *testing.T) {
 	if !strings.HasPrefix(stallReason, "gfw_silent_drop_watchdog") {
 		t.Fatalf("expected reason starting with 'gfw_silent_drop_watchdog', got '%s'", stallReason)
 	}
-	if !strings.Contains(stallReason, "3781B received < 8KB threshold") {
-		t.Fatalf("expected reason to mention 3781B and < 8KB threshold, got '%s'", stallReason)
+	if !strings.Contains(stallReason, "512B received < 1KB threshold") {
+		t.Fatalf("expected reason to mention 512B and < 1KB threshold, got '%s'", stallReason)
 	}
 	if !strings.Contains(stallReason, "timeout 50ms") {
 		t.Fatalf("expected reason to mention timeout 50ms, got '%s'", stallReason)

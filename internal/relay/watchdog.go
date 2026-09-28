@@ -16,8 +16,8 @@ import (
 )
 
 // DisarmThresholdBytes is the amount of response data from the remote server required
-// to prove a direct TCP connection healthy and disarm the watchdog (default 8KB).
-const DisarmThresholdBytes int64 = 8 * 1024
+// to prove a direct TCP connection healthy and disarm the watchdog (default 1KB).
+const DisarmThresholdBytes int64 = 1 * 1024
 
 // StallCallback is invoked when a watchdog detects a silent drop / GFW stall or early reset.
 type StallCallback func(host string, port int, domain, reason string)
@@ -172,8 +172,8 @@ func (w *watchdogConn) armTimer(d time.Duration) {
 					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, 0B received)", w.cfg.Timeout)
 					cause = fmt.Sprintf("in-flight request timed out after %v with 0 bytes received from remote (complete GFW silent drop)", w.cfg.Timeout)
 				} else {
-					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, %dB received < 8KB threshold)", w.cfg.Timeout, remoteBytes)
-					cause = fmt.Sprintf("in-flight request timed out after %v: remote returned %d bytes (< 8KB disarm threshold %d B), subsequent response stalled", w.cfg.Timeout, remoteBytes, DisarmThresholdBytes)
+					reason = fmt.Sprintf("gfw_silent_drop_watchdog (timeout %v, %dB received < 1KB threshold)", w.cfg.Timeout, remoteBytes)
+					cause = fmt.Sprintf("in-flight request timed out after %v: remote returned %d bytes (< 1KB disarm threshold %d B), subsequent response stalled", w.cfg.Timeout, remoteBytes, DisarmThresholdBytes)
 				}
 				w.trigger(reason, cause)
 			}
@@ -242,7 +242,7 @@ func (w *watchdogConn) handleError(direction string, err error) {
 			return
 		}
 		if w.recentlyInFlight() {
-			cause := fmt.Sprintf("remote connection reset/aborted (%v) within %v grace window after receiving %d bytes (< 8KB threshold)", err, w.cfg.RSTGraceWindow, remoteBytes)
+			cause := fmt.Sprintf("remote connection reset/aborted (%v) within %v grace window after receiving %d bytes (< 1KB threshold)", err, w.cfg.RSTGraceWindow, remoteBytes)
 			reason := fmt.Sprintf("gfw_rst_injected (%v within %v grace window, %dB received)", err, w.cfg.RSTGraceWindow, remoteBytes)
 			w.trigger(reason, cause)
 			return
