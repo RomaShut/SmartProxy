@@ -194,3 +194,5 @@ require (
 )
 
 tool golang.org/x/mobile/cmd/gobind
+
+replace github.com/sagernet/sing-tun => ./third_party/sing-tun

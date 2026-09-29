@@ -18,6 +18,7 @@ on:
       - 'mobile/**'
       - 'android/**'
       - 'internal/**'
+      - 'third_party/**'
   workflow_dispatch:
     inputs:
       version:
