@@ -105,6 +105,7 @@
     <string name="service_stack_title">网络协议栈 (TUN Stack)</string>
     <string name="cd_choose_tun_stack">选择网络协议栈</string>
     <string name="stack_gvisor">gVisor (推荐 / 免 Root)</string>
+    <string name="stack_go">Go (自研高性能 / 需 Root)</string>
     <string name="stack_system">System (需 Root 权限)</string>
     <string name="stack_mixed">Mixed (需 Root 权限)</string>
     <string name="stack_need_root_sub">需要 Root 权限</string>

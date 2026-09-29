@@ -127,7 +127,7 @@ object ConfigProvider {
         writeConfig(context, json)
     }
 
-    /** 设置 TUN 协议栈 (gvisor / system / mixed)。 */
+    /** 设置 TUN 协议栈 (gvisor / go / system / mixed)。 */
     fun setTunStack(context: Context, stack: String) {
         val json = readConfig(context)
         val tun = json.optJSONObject("tun") ?: JSONObject().also { json.put("tun", it) }

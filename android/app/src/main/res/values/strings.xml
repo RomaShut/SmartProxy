@@ -105,6 +105,7 @@
     <string name="service_stack_title">Network Stack (TUN Stack)</string>
     <string name="cd_choose_tun_stack">Choose network stack</string>
     <string name="stack_gvisor">gVisor (Recommended / Non-root)</string>
+    <string name="stack_go">Go (High Performance / Requires Root)</string>
     <string name="stack_system">System (Requires Root)</string>
     <string name="stack_mixed">Mixed (Requires Root)</string>
     <string name="stack_need_root_sub">Requires Root permission</string>

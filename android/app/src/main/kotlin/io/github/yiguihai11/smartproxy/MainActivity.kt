@@ -383,6 +383,7 @@ private fun serviceModeLabel(context: Context, mode: String): String = when (mod
 }
 
 private fun tunStackLabel(context: Context, stack: String): String = when (stack) {
+    AppPrefs.STACK_GO -> context.getString(R.string.stack_go)
     AppPrefs.STACK_SYSTEM -> context.getString(R.string.stack_system)
     AppPrefs.STACK_MIXED -> context.getString(R.string.stack_mixed)
     else -> context.getString(R.string.stack_gvisor)
@@ -1332,7 +1333,7 @@ private fun ServiceModeDialog(
     var stackExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val modeOptions = listOf(AppPrefs.MODE_VPN, AppPrefs.MODE_SOCKS5)
-    val stackOptions = listOf(AppPrefs.STACK_GVISOR, AppPrefs.STACK_SYSTEM, AppPrefs.STACK_MIXED)
+    val stackOptions = listOf(AppPrefs.STACK_GVISOR, AppPrefs.STACK_GO, AppPrefs.STACK_SYSTEM, AppPrefs.STACK_MIXED)
 
     AlertDialog(
         onDismissRequest = onDismiss,
