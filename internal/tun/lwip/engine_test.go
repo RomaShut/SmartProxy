@@ -136,6 +136,65 @@ func buildIPv6UDP(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) 
 	return pkt
 }
 
+func buildIPv4ICMP(srcIP, dstIP net.IP, icmpType, icmpCode uint8, id, seq uint16, payload []byte) []byte {
+	totalLen := 20 + 8 + len(payload)
+	pkt := make([]byte, totalLen)
+
+	// IPv4 Header
+	pkt[0] = 0x45
+	pkt[1] = 0x00
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(totalLen))
+	binary.BigEndian.PutUint16(pkt[4:6], 0x1122)
+	pkt[6] = 0x40
+	pkt[7] = 0x00
+	pkt[8] = 64
+	pkt[9] = 1 // ICMP
+	copy(pkt[12:16], srcIP.To4())
+	copy(pkt[16:20], dstIP.To4())
+	binary.BigEndian.PutUint16(pkt[10:12], checksum(pkt[0:20]))
+
+	// ICMP Header
+	pkt[20] = icmpType
+	pkt[21] = icmpCode
+	binary.BigEndian.PutUint16(pkt[24:26], id)
+	binary.BigEndian.PutUint16(pkt[26:28], seq)
+	if len(payload) > 0 {
+		copy(pkt[28:], payload)
+	}
+	binary.BigEndian.PutUint16(pkt[22:24], checksum(pkt[20:]))
+
+	return pkt
+}
+
+func buildIPv6ICMP(srcIP, dstIP net.IP, icmpType, icmpCode uint8, id, seq uint16, payload []byte) []byte {
+	icmpLen := 8 + len(payload)
+	totalLen := 40 + icmpLen
+	pkt := make([]byte, totalLen)
+
+	// IPv6 Header
+	pkt[0] = 0x60
+	binary.BigEndian.PutUint16(pkt[4:6], uint16(icmpLen))
+	pkt[6] = 58 // Next header: ICMPv6
+	pkt[7] = 64
+	copy(pkt[8:24], srcIP.To16())
+	copy(pkt[24:40], dstIP.To16())
+
+	// ICMPv6 Header
+	icmpHeader := pkt[40:]
+	icmpHeader[0] = icmpType
+	icmpHeader[1] = icmpCode
+	binary.BigEndian.PutUint16(icmpHeader[4:6], id)
+	binary.BigEndian.PutUint16(icmpHeader[6:8], seq)
+	if len(payload) > 0 {
+		copy(icmpHeader[8:], payload)
+	}
+
+	chk := calcIPv6UpperChecksum(srcIP, dstIP, 58, icmpHeader)
+	binary.BigEndian.PutUint16(icmpHeader[2:4], chk)
+
+	return pkt
+}
+
 func buildIPv4TCP(srcIP, dstIP net.IP, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
 	totalLen := 20 + 20 + len(payload)
 	pkt := make([]byte, totalLen)
@@ -971,6 +1030,123 @@ func TestEngine_IPv6_UDP(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for IPv6 UDP output packet")
+	}
+}
+
+func TestEngine_ICMPv4_Echo(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	targetIP := net.IPv4(8, 8, 8, 8)
+	pingPayload := []byte("PING_ICMP_DATA")
+
+	// Type 8 = Echo Request, Code 0
+	icmpReq := buildIPv4ICMP(clientIP, targetIP, 8, 0, 0x1234, 1, pingPayload)
+	if err := engine.Input(icmpReq); err != nil {
+		t.Fatalf("Input ICMP failed: %v", err)
+	}
+
+	select {
+	case out := <-outPkts:
+		if len(out) < 28 {
+			t.Fatalf("ICMP reply packet too short: %d", len(out))
+		}
+		if out[9] != 1 {
+			t.Fatalf("expected ICMP protocol (1), got %d", out[9])
+		}
+		// In IPv4 ICMP, type is at byte 20, code at byte 21
+		icmpType := out[20]
+		icmpCode := out[21]
+		if icmpType != 0 || icmpCode != 0 {
+			t.Fatalf("expected ICMP Echo Reply (type 0, code 0), got type=%d, code=%d", icmpType, icmpCode)
+		}
+		id := binary.BigEndian.Uint16(out[24:26])
+		seq := binary.BigEndian.Uint16(out[26:28])
+		if id != 0x1234 || seq != 1 {
+			t.Fatalf("ICMP id/seq mismatch: id=0x%x, seq=%d", id, seq)
+		}
+		if !bytes.Equal(out[28:], pingPayload) {
+			t.Fatalf("ICMP payload mismatch: %s", string(out[28:]))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for ICMP Echo Reply")
+	}
+}
+
+func TestEngine_ICMPv6_Echo(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.ParseIP("fd00::2")
+	targetIP := net.ParseIP("2001:4860:4860::8888")
+	pingPayload := []byte("PING_ICMP6_DATA")
+
+	// Type 128 = ICMPv6 Echo Request, Code 0
+	icmpReq := buildIPv6ICMP(clientIP, targetIP, 128, 0, 0x5678, 2, pingPayload)
+	if err := engine.Input(icmpReq); err != nil {
+		t.Fatalf("Input ICMPv6 failed: %v", err)
+	}
+
+	select {
+	case out := <-outPkts:
+		if len(out) < 48 {
+			t.Fatalf("ICMPv6 reply packet too short: %d", len(out))
+		}
+		if (out[0] >> 4) != 6 {
+			t.Fatalf("expected IPv6 version, got %d", out[0]>>4)
+		}
+		if out[6] != 58 {
+			t.Fatalf("expected ICMPv6 next header (58), got %d", out[6])
+		}
+		// In IPv6, ICMPv6 header starts at byte 40
+		icmpType := out[40]
+		icmpCode := out[41]
+		if icmpType != 129 || icmpCode != 0 {
+			t.Fatalf("expected ICMPv6 Echo Reply (type 129, code 0), got type=%d, code=%d", icmpType, icmpCode)
+		}
+		id := binary.BigEndian.Uint16(out[44:46])
+		seq := binary.BigEndian.Uint16(out[46:48])
+		if id != 0x5678 || seq != 2 {
+			t.Fatalf("ICMPv6 id/seq mismatch: id=0x%x, seq=%d", id, seq)
+		}
+		if !bytes.Equal(out[48:], pingPayload) {
+			t.Fatalf("ICMPv6 payload mismatch: %s", string(out[48:]))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for ICMPv6 Echo Reply")
 	}
 }
 

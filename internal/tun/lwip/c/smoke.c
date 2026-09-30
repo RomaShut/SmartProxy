@@ -143,6 +143,60 @@ static uint32_t build_ipv4_udp(uint8_t *buf,
     return total_len;
 }
 
+static uint16_t calc_checksum(const uint8_t *b, uint32_t len) {
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < len - 1; i += 2) {
+        sum += ((uint32_t)b[i] << 8) | b[i + 1];
+    }
+    if (len % 2 == 1) {
+        sum += (uint32_t)b[len - 1] << 8;
+    }
+    while (sum >> 16) {
+        sum = (sum >> 16) + (sum & 0xffff);
+    }
+    return (uint16_t)~sum;
+}
+
+static uint32_t build_ipv4_icmp(uint8_t *buf,
+                                uint32_t src_ip, uint32_t dst_ip,
+                                uint8_t type, uint8_t code,
+                                uint16_t id, uint16_t seq,
+                                const uint8_t *payload, uint16_t payload_len) {
+    uint16_t total_len = 20 + 8 + payload_len;
+    memset(buf, 0, total_len);
+
+    // IPv4 Header
+    buf[0] = 0x45;
+    buf[1] = 0x00;
+    buf[2] = (uint8_t)(total_len >> 8);
+    buf[3] = (uint8_t)(total_len & 0xFF);
+    buf[4] = 0x33; buf[5] = 0x44;
+    buf[6] = 0x40; buf[7] = 0x00;
+    buf[8] = 64;
+    buf[9] = 1; // Protocol = ICMP
+    memcpy(buf + 12, &src_ip, 4);
+    memcpy(buf + 16, &dst_ip, 4);
+    uint16_t ip_chk = calc_checksum(buf, 20);
+    buf[10] = (uint8_t)(ip_chk >> 8);
+    buf[11] = (uint8_t)(ip_chk & 0xFF);
+
+    // ICMP Header
+    buf[20] = type;
+    buf[21] = code;
+    buf[24] = (uint8_t)(id >> 8);
+    buf[25] = (uint8_t)(id & 0xFF);
+    buf[26] = (uint8_t)(seq >> 8);
+    buf[27] = (uint8_t)(seq & 0xFF);
+    if (payload && payload_len > 0) {
+        memcpy(buf + 28, payload, payload_len);
+    }
+    uint16_t icmp_chk = calc_checksum(buf + 20, 8 + payload_len);
+    buf[22] = (uint8_t)(icmp_chk >> 8);
+    buf[23] = (uint8_t)(icmp_chk & 0xFF);
+
+    return total_len;
+}
+
 int main(void) {
     struct sp_lwip lw;
     memset(&lw, 0, sizeof(lw));
@@ -295,8 +349,35 @@ int main(void) {
         return 1;
     }
 
+    // Test 8: ICMP Echo Request (10.0.0.2 -> 8.8.8.8)
+    const char *ping_msg = "PING_SMOKE";
+    pkt_len = build_ipv4_icmp(packet, client_ip, dns_ip, 8, 0, 0x1234, 1, (const uint8_t *)ping_msg, strlen(ping_msg));
+    int before_icmp_outputs = g_output_packets;
+    err = sp_lwip_input(&lw, packet, pkt_len);
+    if (err != 0) {
+        fprintf(stderr, "sp_lwip_input ICMP failed: %d\n", err);
+        return 1;
+    }
+    if (g_output_packets <= before_icmp_outputs) {
+        fprintf(stderr, "expected ICMP Echo Reply output, but none sent\n");
+        return 1;
+    }
+    // Verify output: protocol 1 (ICMP), type 0 (Echo Reply), code 0
+    if (g_last_output[9] != 1) {
+        fprintf(stderr, "expected ICMP output (proto 1), got %u\n", g_last_output[9]);
+        return 1;
+    }
+    if (g_last_output[20] != 0 || g_last_output[21] != 0) {
+        fprintf(stderr, "expected ICMP Echo Reply (type 0, code 0), got type=%u, code=%u\n", g_last_output[20], g_last_output[21]);
+        return 1;
+    }
+    if (memcmp(g_last_output + 28, ping_msg, strlen(ping_msg)) != 0) {
+        fprintf(stderr, "ICMP payload mismatch\n");
+        return 1;
+    }
+
     sp_lwip_free(&lw);
 
-    puts("smartproxy lwIP smoke test: ALL PASSED (TCP SYN/ACK/ACK/DATA/CLOSE and UDP RECV/SEND/CLOSE verified)");
+    puts("smartproxy lwIP smoke test: ALL PASSED (TCP, UDP, ICMP Echo Reply verified)");
     return 0;
 }
