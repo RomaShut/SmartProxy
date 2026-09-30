@@ -15,6 +15,7 @@ struct sp_lwip {
     sp_lwip_tcp_data_fn tcp_data;
     sp_lwip_tcp_event_fn tcp_event;
     void *ctx;
+    uint8_t output_buf[65536];
 };
 int sp_lwip_init(struct sp_lwip *, const ip4_addr_t *, const ip4_addr_t *, const ip4_addr_t *);
 int sp_lwip_input(struct sp_lwip *, const void *, uint32_t);
@@ -22,6 +23,7 @@ void sp_lwip_timers(void);
 int sp_lwip_tcp_write(struct tcp_pcb *, const void *, uint32_t);
 int sp_lwip_tcp_close(struct tcp_pcb *);
 int sp_lwip_tcp_abort(struct tcp_pcb *);
+void sp_lwip_tcp_set_callbacks(struct tcp_pcb *, struct sp_lwip *);
 #ifdef __cplusplus
 }
 #endif

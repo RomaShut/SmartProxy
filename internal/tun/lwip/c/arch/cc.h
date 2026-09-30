@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <assert.h>
 
+typedef uint32_t sys_prot_t;
+
 #define LWIP_PLATFORM_ASSERT(x) do {     fprintf(stderr, "lwIP assert: %s\\n", (x));     abort(); } while (0)
 
-#define LWIP_PLATFORM_DIAG(x) do { fprintf(stderr, x); } while (0)
+#define LWIP_PLATFORM_DIAG(x) do { printf x; } while (0)
 
 #define PACK_STRUCT_FIELD(x) x
 #define PACK_STRUCT_STRUCT __attribute__((packed))

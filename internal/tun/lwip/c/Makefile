@@ -2,7 +2,7 @@ LWIP_DIR ?= ../../../../third_party/lwip
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror -std=c11
 CPPFLAGS += -I. -I$(LWIP_DIR)/src/include -DLWIP_NOASSERT
-CFLAGS += -MMD -MP
+CFLAGS += -MMD -MP -Wno-unused-but-set-variable -Wno-unused-parameter
 
 CORE_SRCS := \
  $(LWIP_DIR)/src/core/init.c \
@@ -44,7 +44,7 @@ check: all
 	@echo "lwIP C adapter build OK"
 
 clean:
-	rm -f libsmartproxy_lwip.a lwip_adapter.o lwip_adapter.d
+	rm -f libsmartproxy_lwip.a lwip_adapter.o lwip_adapter.d smoke smoke.o smoke.d
 	find $(LWIP_DIR)/src -name '*.o' -o -name '*.d' | xargs -r rm -f
 
 -include $(DEPS)
