@@ -1027,3 +1027,20 @@ func TestSubscriptionConf_UsesProxy(t *testing.T) {
 		t.Fatalf("expected missing use_proxy to default on, got ptr=%v", parsed.UseProxy)
 	}
 }
+
+func TestValidate_TUNStack(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TUN.Enabled = true
+
+	for _, valid := range []string{"gvisor", "mixed", "system", "go", "lwip", ""} {
+		cfg.TUN.Stack = valid
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected stack %q to be valid, got: %v", valid, err)
+		}
+	}
+
+	cfg.TUN.Stack = "invalid_stack"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected invalid stack to fail validation")
+	}
+}

@@ -92,6 +92,10 @@ func SetLingerZero(conn any) {
 // to locate the underlying tcpip.Endpoint and configure LingerOption{Enabled: true, Timeout: 0},
 // causing the gVisor stack to emit an immediate TCP RST segment on Close().
 func setGVisorLingerZero(conn any) {
+	if sl, ok := conn.(interface{ SetLinger(int) error }); ok {
+		_ = sl.SetLinger(0)
+		return
+	}
 	type socketOptionsGetter interface {
 		SocketOptions() *tcpip.SocketOptions
 	}

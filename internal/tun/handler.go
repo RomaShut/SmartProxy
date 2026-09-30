@@ -1101,7 +1101,14 @@ func dnsResponseBuffer(payload []byte) *buf.Buffer {
 }
 
 var NewTUN = singtun.New
-var NewTUNStack = singtun.NewStack
+var NewTUNStack = createTUNStack
+
+func createTUNStack(stackType string, stackOpts singtun.StackOptions) (singtun.Stack, error) {
+	if stackType == "lwip" {
+		return NewLWIPStack(stackOpts)
+	}
+	return singtun.NewStack(stackType, stackOpts)
+}
 
 var currentMemoryPressure atomic.Uint32
 

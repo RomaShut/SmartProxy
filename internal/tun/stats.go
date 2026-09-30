@@ -328,6 +328,13 @@ func (c *countingConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (c *countingConn) SetLinger(sec int) error {
+	if sl, ok := c.Conn.(interface{ SetLinger(int) error }); ok {
+		return sl.SetLinger(sec)
+	}
+	return nil
+}
+
 // countingPacketConn 包 N.PacketConn 计字节:ReadPacket(app 发)= 上行,
 // WritePacket(回给 app)= 下行。
 type countingPacketConn struct {

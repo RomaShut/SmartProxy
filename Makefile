@@ -21,7 +21,7 @@ LDFLAGS := -s -w \
 	-X smartproxy/internal/version.GitCommit=$(GIT_COMMIT) \
 	-X 'smartproxy/internal/version.BuildTime=$(BUILD_TIME)'
 
-BUILD_TAGS := with_gvisor,with_quic,with_utls,with_wireguard
+BUILD_TAGS := with_gvisor,with_quic,with_utls,with_wireguard,with_lwip
 
 CROSS := \
 	$(OUTDIR)/$(BINARY)-linux-amd64 \
@@ -61,7 +61,7 @@ build-all: $(CROSS)
 
 $(OUTDIR)/$(BINARY)-%:
 	@mkdir -p $(OUTDIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -tags $(BUILD_TAGS) -ldflags="$(LDFLAGS)" -o $@ $(MAIN)
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -tags $(BUILD_TAGS) -ldflags="$(LDFLAGS)" -o $@ $(MAIN)
 	@echo "=> $@"
 
 ## test: run all unit tests
