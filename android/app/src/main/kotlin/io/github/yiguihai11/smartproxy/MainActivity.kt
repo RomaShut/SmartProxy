@@ -383,6 +383,7 @@ private fun serviceModeLabel(context: Context, mode: String): String = when (mod
 }
 
 private fun tunStackLabel(context: Context, stack: String): String = when (stack) {
+    AppPrefs.STACK_LWIP -> context.getString(R.string.stack_lwip)
     AppPrefs.STACK_GO -> context.getString(R.string.stack_go)
     AppPrefs.STACK_SYSTEM -> context.getString(R.string.stack_system)
     AppPrefs.STACK_MIXED -> context.getString(R.string.stack_mixed)
@@ -1328,12 +1329,12 @@ private fun ServiceModeDialog(
     onSave: (String, String) -> Unit
 ) {
     var selectedMode by remember { mutableStateOf(initialMode) }
-    var selectedStack by remember { mutableStateOf(if (!isRooted && initialStack != AppPrefs.STACK_GO) AppPrefs.STACK_GVISOR else initialStack) }
+    var selectedStack by remember { mutableStateOf(if (!isRooted && initialStack != AppPrefs.STACK_GO && initialStack != AppPrefs.STACK_LWIP) AppPrefs.STACK_GVISOR else initialStack) }
     var modeExpanded by remember { mutableStateOf(false) }
     var stackExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val modeOptions = listOf(AppPrefs.MODE_VPN, AppPrefs.MODE_SOCKS5)
-    val stackOptions = listOf(AppPrefs.STACK_GVISOR, AppPrefs.STACK_GO, AppPrefs.STACK_SYSTEM, AppPrefs.STACK_MIXED)
+    val stackOptions = listOf(AppPrefs.STACK_GVISOR, AppPrefs.STACK_LWIP, AppPrefs.STACK_GO, AppPrefs.STACK_SYSTEM, AppPrefs.STACK_MIXED)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1424,7 +1425,7 @@ private fun ServiceModeDialog(
                     }
                     DropdownMenu(expanded = stackExpanded && isVpn, onDismissRequest = { stackExpanded = false }) {
                         stackOptions.forEach { stack ->
-                            val canSelect = stack == AppPrefs.STACK_GVISOR || stack == AppPrefs.STACK_GO || isRooted
+                            val canSelect = stack == AppPrefs.STACK_GVISOR || stack == AppPrefs.STACK_LWIP || stack == AppPrefs.STACK_GO || isRooted
                             DropdownMenuItem(
                                 text = {
                                     Column {

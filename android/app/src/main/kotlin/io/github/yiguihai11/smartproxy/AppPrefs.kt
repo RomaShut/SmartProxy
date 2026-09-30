@@ -154,8 +154,9 @@ object AppPrefs {
     const val MODE_VPN = "vpn"
     const val MODE_SOCKS5 = "socks5"
 
-    /** 协议栈:gvisor = 默认(免 Root,纯用户态);go = 原生 Go 栈(自研轻量 / 免 Root);system = 系统内核栈(需 Root);mixed = 混合栈(需 Root)。 */
+    /** 协议栈:gvisor = 默认(免 Root,纯用户态);lwip = lwIP 栈(自研轻量低内存 / 免 Root);go = 原生 Go 栈(自研轻量 / 免 Root);system = 系统内核栈(需 Root);mixed = 混合栈(需 Root)。 */
     const val STACK_GVISOR = "gvisor"
+    const val STACK_LWIP = "lwip"
     const val STACK_GO = "go"
     const val STACK_SYSTEM = "system"
     const val STACK_MIXED = "mixed"
@@ -164,14 +165,14 @@ object AppPrefs {
 
     fun tunStack(context: Context): String {
         val s = sp(context).getString(KEY_TUN_STACK, STACK_GVISOR) ?: STACK_GVISOR
-        if (!RootUtils.isDeviceRooted && s != STACK_GVISOR && s != STACK_GO) {
+        if (!RootUtils.isDeviceRooted && s != STACK_GVISOR && s != STACK_LWIP && s != STACK_GO) {
             return STACK_GVISOR
         }
         return s
     }
 
     fun setTunStack(context: Context, stack: String) {
-        val s = if (!RootUtils.isDeviceRooted && stack != STACK_GVISOR && stack != STACK_GO) STACK_GVISOR else stack
+        val s = if (!RootUtils.isDeviceRooted && stack != STACK_GVISOR && stack != STACK_LWIP && stack != STACK_GO) STACK_GVISOR else stack
         sp(context).edit().putString(KEY_TUN_STACK, s).apply()
     }
 
