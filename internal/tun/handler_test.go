@@ -321,6 +321,13 @@ func TestTUNHandler_Start(t *testing.T) {
 	mockTun := new(MockTun)
 	mockStack := new(MockStack)
 
+	oldNewTUN := NewTUN
+	oldNewTUNStack := NewTUNStack
+	defer func() {
+		NewTUN = oldNewTUN
+		NewTUNStack = oldNewTUNStack
+	}()
+
 	NewTUN = func(opts singtun.Options) (singtun.Tun, error) {
 		assert.Equal(t, "test_tun", opts.Name)
 		return mockTun, nil
@@ -387,6 +394,13 @@ func TestTUNHandler_Start_FdMode_MTUDefault(t *testing.T) {
 
 	mockTun := new(MockTun)
 	mockStack := new(MockStack)
+
+	oldNewTUN := NewTUN
+	oldNewTUNStack := NewTUNStack
+	defer func() {
+		NewTUN = oldNewTUN
+		NewTUNStack = oldNewTUNStack
+	}()
 
 	NewTUN = func(opts singtun.Options) (singtun.Tun, error) {
 
@@ -471,6 +485,13 @@ func TestTUNHandler_Start_FdMode_NoAddresses(t *testing.T) {
 	mockTun := new(MockTun)
 	mockStack := new(MockStack)
 
+	oldNewTUN := NewTUN
+	oldNewTUNStack := NewTUNStack
+	defer func() {
+		NewTUN = oldNewTUN
+		NewTUNStack = oldNewTUNStack
+	}()
+
 	NewTUN = func(opts singtun.Options) (singtun.Tun, error) {
 
 		assert.Empty(t, opts.Inet4Address)
@@ -547,6 +568,13 @@ func TestTUNHandler_Start_DefaultStack(t *testing.T) {
 
 	mockTun := new(MockTun)
 	mockStack := new(MockStack)
+
+	oldNewTUN := NewTUN
+	oldNewTUNStack := NewTUNStack
+	defer func() {
+		NewTUN = oldNewTUN
+		NewTUNStack = oldNewTUNStack
+	}()
 
 	NewTUN = func(opts singtun.Options) (singtun.Tun, error) {
 		return mockTun, nil

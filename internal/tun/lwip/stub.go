@@ -13,6 +13,13 @@ var ErrNotImplemented = errors.New("lwip backend is not included in this build, 
 // PacketConn stub when built without with_lwip tag.
 type PacketConn struct{}
 
+// Conn stub when built without with_lwip tag.
+type Conn struct{}
+
+func (c *Conn) SetLinger(sec int) error {
+	return nil
+}
+
 // Config configures the lwIP Engine.
 type Config struct {
 	IPv4       net.IP

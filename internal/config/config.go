@@ -489,6 +489,13 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if c.TUN.Enabled && c.TUN.Stack != "" {
+		switch c.TUN.Stack {
+		case "gvisor", "mixed", "system", "go", "lwip":
+		default:
+			errs = append(errs, fmt.Sprintf("tun.stack must be one of 'gvisor', 'mixed', 'system', 'go', or 'lwip', got %q", c.TUN.Stack))
+		}
+	}
 	if len(errs) == 0 {
 		return nil
 	}

@@ -33,7 +33,8 @@ type Conn struct {
 	recvBuf  []byte
 	readErr  error
 	eof      bool
-	closed   bool
+	closed     bool
+	lingerZero bool
 
 	closeChan chan struct{}
 
@@ -173,6 +174,15 @@ func (c *Conn) Write(b []byte) (int, error) {
 	}
 }
 
+// SetLinger configures whether Close() should abort the connection with a TCP RST segment.
+// Setting sec == 0 causes subsequent Close() to emit a TCP RST instead of FIN.
+func (c *Conn) SetLinger(sec int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lingerZero = (sec == 0)
+	return nil
+}
+
 func (c *Conn) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -180,6 +190,7 @@ func (c *Conn) Close() error {
 		return nil
 	}
 	c.closed = true
+	isLingerZero := c.lingerZero
 	close(c.closeChan)
 	if c.readTimer != nil {
 		c.readTimer.Stop()
@@ -188,7 +199,11 @@ func (c *Conn) Close() error {
 	c.readCond.Broadcast()
 	c.mu.Unlock()
 
-	c.engine.postClose(c.id)
+	if isLingerZero {
+		c.engine.postAbort(c.id)
+	} else {
+		c.engine.postClose(c.id)
+	}
 	return nil
 }
 

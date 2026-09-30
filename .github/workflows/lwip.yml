@@ -3,14 +3,18 @@ name: lwIP backend
 on:
   pull_request:
     paths:
-      - 'internal/tun/lwip/**'
+      - 'internal/tun/**'
+      - 'internal/config/**'
+      - 'internal/netutil/**'
       - 'third_party/lwip'
       - '.gitmodules'
       - '.github/workflows/lwip.yml'
   push:
     branches: [main]
     paths:
-      - 'internal/tun/lwip/**'
+      - 'internal/tun/**'
+      - 'internal/config/**'
+      - 'internal/netutil/**'
       - 'third_party/lwip'
       - '.gitmodules'
       - '.github/workflows/lwip.yml'
@@ -33,4 +37,4 @@ jobs:
           go-version: '1.27'
           cache: true
       - name: Run Go lwIP integration tests
-        run: go test -v -tags with_lwip -race -count=1 ./internal/tun/lwip/...
+        run: go test -v -tags with_lwip -race -count=1 ./internal/tun/...
