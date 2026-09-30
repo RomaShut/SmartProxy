@@ -4,6 +4,7 @@
 
 #include "lwip_adapter.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "lwip/init.h"
@@ -12,17 +13,55 @@
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
 #include "lwip/timeouts.h"
+#include "lwip/priv/tcp_priv.h"
+
+struct sp_tcp_conn {
+    struct sp_lwip *lw;
+    struct tcp_pcb *pcb;
+    uint64_t id;
+    struct sp_tcp_conn *next;
+};
+
+static struct sp_tcp_conn *sp_find_conn(struct sp_lwip *lw, uint64_t id) {
+    if (!lw || !id) return NULL;
+    uint32_t b = (uint32_t)(id % 256);
+    struct sp_tcp_conn *c = lw->conn_buckets[b];
+    while (c) {
+        if (c->id == id) return c;
+        c = c->next;
+    }
+    return NULL;
+}
+
+static void sp_add_conn(struct sp_lwip *lw, struct sp_tcp_conn *conn) {
+    uint32_t b = (uint32_t)(conn->id % 256);
+    conn->next = lw->conn_buckets[b];
+    lw->conn_buckets[b] = conn;
+}
+
+static void sp_remove_conn(struct sp_lwip *lw, struct sp_tcp_conn *conn) {
+    uint32_t b = (uint32_t)(conn->id % 256);
+    struct sp_tcp_conn **curr = &lw->conn_buckets[b];
+    while (*curr) {
+        if (*curr == conn) {
+            *curr = conn->next;
+            conn->next = NULL;
+            return;
+        }
+        curr = &(*curr)->next;
+    }
+}
 
 static err_t sp_output_pbuf(struct netif *n, struct pbuf *p) {
     struct sp_lwip *lw = n ? (struct sp_lwip *)n->state : NULL;
     if (!lw || !lw->packet_output) return ERR_IF;
     if (p->next == NULL) {
-        lw->packet_output((const uint8_t *)p->payload, p->tot_len, lw->ctx);
+        lw->packet_output((const uint8_t *)p->payload, p->tot_len, lw->ctx_id);
         return ERR_OK;
     }
     u16_t copied = pbuf_copy_partial(p, lw->output_buf, (u16_t)p->tot_len, 0);
     if (copied != p->tot_len) return ERR_BUF;
-    lw->packet_output(lw->output_buf, copied, lw->ctx);
+    lw->packet_output(lw->output_buf, copied, lw->ctx_id);
     return ERR_OK;
 }
 
@@ -48,39 +87,207 @@ static err_t sp_netif_init(struct netif *n) {
     return ERR_OK;
 }
 
-static err_t sp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
-    struct sp_lwip *lw = (struct sp_lwip *)arg;
-    if (!lw) return ERR_ABRT;
-    if (!p) { if (lw->tcp_event) lw->tcp_event(pcb, ERR_OK, lw->ctx); return ERR_OK; }
-    if (err != ERR_OK) { pbuf_free(p); if (lw->tcp_event) lw->tcp_event(pcb, err, lw->ctx); return err; }
-    for (struct pbuf *q=p; q; q=q->next)
-        if (lw->tcp_data) lw->tcp_data(pcb, (const uint8_t *)q->payload, q->len, lw->ctx);
-    tcp_recved(pcb, p->tot_len);
+static err_t sp_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
+    struct sp_tcp_conn *conn = (struct sp_tcp_conn *)arg;
+    (void)pcb;
+    if (!conn || !conn->lw) {
+        if (p) pbuf_free(p);
+        return ERR_ABRT;
+    }
+
+    struct sp_lwip *lw = conn->lw;
+    if (!p) {
+        // Remote sent FIN (EOF)
+        if (lw->tcp_recv) {
+            lw->tcp_recv(conn->id, NULL, 0, lw->ctx_id);
+        }
+        return ERR_OK;
+    }
+
+    if (err != ERR_OK) {
+        pbuf_free(p);
+        if (lw->tcp_err) {
+            lw->tcp_err(conn->id, (int)err, lw->ctx_id);
+        }
+        return err;
+    }
+
+    if (lw->tcp_recv) {
+        for (struct pbuf *q = p; q != NULL; q = q->next) {
+            lw->tcp_recv(conn->id, (const uint8_t *)q->payload, q->len, lw->ctx_id);
+        }
+    }
     pbuf_free(p);
     return ERR_OK;
 }
 
-static void sp_err(void *arg, err_t err) {
-    struct sp_lwip *lw = (struct sp_lwip *)arg;
-    if (lw && lw->tcp_event) lw->tcp_event(NULL, err, lw->ctx);
+static err_t sp_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len) {
+    struct sp_tcp_conn *conn = (struct sp_tcp_conn *)arg;
+    (void)pcb;
+    if (conn && conn->lw && conn->lw->tcp_sent) {
+        conn->lw->tcp_sent(conn->id, len, conn->lw->ctx_id);
+    }
+    return ERR_OK;
 }
 
-void sp_lwip_tcp_set_callbacks(struct tcp_pcb *pcb, struct sp_lwip *lw) {
-    if (!pcb || !lw) return;
-    tcp_arg(pcb, lw);
-    tcp_recv(pcb, sp_recv);
-    tcp_err(pcb, sp_err);
+static void sp_tcp_err_cb(void *arg, err_t err) {
+    struct sp_tcp_conn *conn = (struct sp_tcp_conn *)arg;
+    if (!conn) return;
+    struct sp_lwip *lw = conn->lw;
+    uint64_t id = conn->id;
+
+    conn->pcb = NULL; // PCB already deallocated by lwIP
+    sp_remove_conn(lw, conn);
+    free(conn);
+
+    if (lw && lw->tcp_err) {
+        lw->tcp_err(id, (int)err, lw->ctx_id);
+    }
+}
+
+static err_t sp_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
+    struct sp_lwip *lw = (struct sp_lwip *)arg;
+    if (err != ERR_OK || !lw || !newpcb) {
+        return err != ERR_OK ? err : ERR_VAL;
+    }
+
+    struct sp_tcp_conn *conn = (struct sp_tcp_conn *)calloc(1, sizeof(struct sp_tcp_conn));
+    if (!conn) {
+        return ERR_MEM;
+    }
+
+    conn->lw = lw;
+    conn->pcb = newpcb;
+    conn->id = ++lw->next_conn_id;
+    sp_add_conn(lw, conn);
+
+    tcp_arg(newpcb, conn);
+    tcp_recv(newpcb, sp_tcp_recv_cb);
+    tcp_sent(newpcb, sp_tcp_sent_cb);
+    tcp_err(newpcb, sp_tcp_err_cb);
+
+    if (lw->tcp_accept) {
+        int is_ipv6 = IP_IS_V6(&newpcb->local_ip) ? 1 : 0;
+        const void *src_ip = is_ipv6 ? (const void *)&newpcb->remote_ip.u_addr.ip6.addr : (const void *)&newpcb->remote_ip.u_addr.ip4.addr;
+        const void *dst_ip = is_ipv6 ? (const void *)&newpcb->local_ip.u_addr.ip6.addr : (const void *)&newpcb->local_ip.u_addr.ip4.addr;
+        lw->tcp_accept(conn->id, is_ipv6, src_ip, newpcb->remote_port, dst_ip, newpcb->local_port, lw->ctx_id);
+    }
+
+    return ERR_OK;
+}
+
+void sp_set_ip4_addr(ip4_addr_t *a, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
+    if (!a) return;
+    IP4_ADDR(a, b0, b1, b2, b3);
+}
+
+static int g_lwip_initialized = 0;
+
+static void abort_all_netif_pcbs(struct netif *netif) {
+    u8_t idx = netif_get_index(netif);
+    for (int l = 1; l < NUM_TCP_PCB_LISTS; l++) {
+        struct tcp_pcb *pcb = *tcp_pcb_lists[l];
+        while (pcb != NULL) {
+            struct tcp_pcb *next = pcb->next;
+            if (pcb->netif_idx == idx || pcb->netif_idx == NETIF_NO_INDEX) {
+                tcp_abort(pcb);
+            }
+            pcb = next;
+        }
+    }
 }
 
 int sp_lwip_init(struct sp_lwip *lw, const ip4_addr_t *ip, const ip4_addr_t *mask, const ip4_addr_t *gw) {
     if (!lw) return -1;
-    lwip_init();
+    if (!g_lwip_initialized) {
+        lwip_init();
+        g_lwip_initialized = 1;
+    }
     memset(&lw->netif, 0, sizeof(lw->netif));
+    memset(lw->conn_buckets, 0, sizeof(lw->conn_buckets));
+    lw->next_conn_id = 0;
     lw->netif.state = lw;
+
     if (!netif_add(&lw->netif, ip, mask, gw, lw, sp_netif_init, ip_input)) return -2;
     netif_set_up(&lw->netif);
     netif_set_default(&lw->netif);
+
+    // Enable PRETEND flags for transparent proxying
+    netif_set_flags(&lw->netif, NETIF_FLAG_PRETEND_TCP | NETIF_FLAG_PRETEND_UDP | NETIF_FLAG_PRETEND_ICMP);
+
+    // Wildcard TCP listener
+    struct tcp_pcb *l = tcp_new_ip_type(IPADDR_TYPE_ANY);
+    if (!l) return -3;
+    tcp_bind_netif(l, &lw->netif);
+    err_t berr = tcp_bind(l, NULL, 0);
+    if (berr != ERR_OK) {
+        tcp_close(l);
+        return -4;
+    }
+    lw->tcp_listener = tcp_listen(l);
+    if (!lw->tcp_listener) {
+        tcp_close(l);
+        return -5;
+    }
+    tcp_arg(lw->tcp_listener, lw);
+    tcp_accept(lw->tcp_listener, sp_tcp_accept_cb);
+
     return 0;
+}
+
+struct sp_lwip *sp_lwip_new(void) {
+    return (struct sp_lwip *)calloc(1, sizeof(struct sp_lwip));
+}
+
+void sp_lwip_set_callbacks(
+    struct sp_lwip *lw,
+    sp_lwip_packet_output_fn packet_output,
+    sp_lwip_tcp_accept_fn tcp_accept,
+    sp_lwip_tcp_recv_fn tcp_recv,
+    sp_lwip_tcp_sent_fn tcp_sent,
+    sp_lwip_tcp_err_fn tcp_err,
+    uint64_t ctx_id
+) {
+    if (!lw) return;
+    lw->packet_output = packet_output;
+    lw->tcp_accept = tcp_accept;
+    lw->tcp_recv = tcp_recv;
+    lw->tcp_sent = tcp_sent;
+    lw->tcp_err = tcp_err;
+    lw->ctx_id = ctx_id;
+}
+
+void sp_lwip_free(struct sp_lwip *lw) {
+    if (!lw) return;
+    if (lw->tcp_listener) {
+        tcp_close(lw->tcp_listener);
+        lw->tcp_listener = NULL;
+    }
+    for (int i = 0; i < 256; i++) {
+        struct sp_tcp_conn *c = lw->conn_buckets[i];
+        while (c) {
+            struct sp_tcp_conn *next = c->next;
+            if (c->pcb) {
+                tcp_arg(c->pcb, NULL);
+                tcp_recv(c->pcb, NULL);
+                tcp_sent(c->pcb, NULL);
+                tcp_err(c->pcb, NULL);
+                tcp_abort(c->pcb);
+                c->pcb = NULL;
+            }
+            free(c);
+            c = next;
+        }
+        lw->conn_buckets[i] = NULL;
+    }
+    abort_all_netif_pcbs(&lw->netif);
+    netif_remove(&lw->netif);
+}
+
+void sp_lwip_destroy(struct sp_lwip *lw) {
+    if (!lw) return;
+    sp_lwip_free(lw);
+    free(lw);
 }
 
 int sp_lwip_input(struct sp_lwip *lw, const void *data, uint32_t len) {
@@ -101,12 +308,83 @@ u32_t sys_now(void) {
 
 void sp_lwip_timers(void) { sys_check_timeouts(); }
 
-int sp_lwip_tcp_write(struct tcp_pcb *pcb, const void *data, uint32_t len) {
-    if (!pcb || !data || !len) return ERR_ARG;
-    err_t e = tcp_write(pcb, data, len, TCP_WRITE_FLAG_COPY);
-    if (e != ERR_OK) return e;
-    return tcp_output(pcb);
+int sp_lwip_tcp_write(struct sp_lwip *lw, uint64_t conn_id, const void *data, uint32_t len) {
+    if (!lw || !data || !len) return ERR_ARG;
+    struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
+    if (!conn || !conn->pcb) return ERR_CONN;
+
+    u16_t sndbuf = tcp_sndbuf(conn->pcb);
+    if (sndbuf == 0) {
+        return 0; // Backpressure: buffer full
+    }
+
+    uint32_t to_write = len > sndbuf ? sndbuf : len;
+    if (to_write > 0xFFFF) to_write = 0xFFFF;
+
+    err_t err = tcp_write(conn->pcb, data, (u16_t)to_write, TCP_WRITE_FLAG_COPY);
+    if (err != ERR_OK) {
+        return (int)err;
+    }
+
+    tcp_output(conn->pcb);
+    return (int)to_write;
 }
 
-int sp_lwip_tcp_close(struct tcp_pcb *pcb) { return pcb ? tcp_close(pcb) : ERR_ARG; }
-int sp_lwip_tcp_abort(struct tcp_pcb *pcb) { if (!pcb) return ERR_ARG; tcp_abort(pcb); return ERR_ABRT; }
+int sp_lwip_tcp_recved(struct sp_lwip *lw, uint64_t conn_id, uint32_t len) {
+    if (!lw || !len) return ERR_ARG;
+    struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
+    if (!conn || !conn->pcb) return ERR_CONN;
+
+    while (len > 0) {
+        u16_t chunk = len > 0xFFFF ? 0xFFFF : (u16_t)len;
+        tcp_recved(conn->pcb, chunk);
+        len -= chunk;
+    }
+    return 0;
+}
+
+int sp_lwip_tcp_close(struct sp_lwip *lw, uint64_t conn_id) {
+    if (!lw) return ERR_ARG;
+    struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
+    if (!conn) return ERR_CONN;
+
+    if (conn->pcb) {
+        tcp_arg(conn->pcb, NULL);
+        tcp_recv(conn->pcb, NULL);
+        tcp_sent(conn->pcb, NULL);
+        tcp_err(conn->pcb, NULL);
+        err_t err = tcp_close(conn->pcb);
+        if (err != ERR_OK) {
+            tcp_abort(conn->pcb);
+        }
+        conn->pcb = NULL;
+    }
+    sp_remove_conn(lw, conn);
+    free(conn);
+    return 0;
+}
+
+int sp_lwip_tcp_abort(struct sp_lwip *lw, uint64_t conn_id) {
+    if (!lw) return ERR_ARG;
+    struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
+    if (!conn) return ERR_CONN;
+
+    if (conn->pcb) {
+        tcp_arg(conn->pcb, NULL);
+        tcp_recv(conn->pcb, NULL);
+        tcp_sent(conn->pcb, NULL);
+        tcp_err(conn->pcb, NULL);
+        tcp_abort(conn->pcb);
+        conn->pcb = NULL;
+    }
+    sp_remove_conn(lw, conn);
+    free(conn);
+    return 0;
+}
+
+int sp_lwip_tcp_sndbuf(struct sp_lwip *lw, uint64_t conn_id) {
+    if (!lw) return ERR_ARG;
+    struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
+    if (!conn || !conn->pcb) return ERR_CONN;
+    return (int)tcp_sndbuf(conn->pcb);
+}
