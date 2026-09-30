@@ -210,6 +210,190 @@ func TestGoStack_Verification(t *testing.T) {
 	}
 }
 
+func TestSystemStack_Verification(t *testing.T) {
+	tun := newPipeTun("pipe_tun_system")
+	defer tun.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			b := buf.NewPacket()
+			defer b.Release()
+			for {
+				b.Reset()
+				_, err := conn.ReadPacket(b)
+				if err != nil {
+					return
+				}
+				received.Add(int64(b.Len()))
+			}
+		},
+	}
+	s, err := singtun.NewStack("system", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(127, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := []byte("hello system stack udp")
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+	tun.readCh <- pkt
+
+	require.Eventually(t, func() bool {
+		return received.Load() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Test TCP SYN packet rewrite by System stack
+	syn := testBuildIPv4TCP(net.IPv4(10, 0, 0, 2), net.IPv4(1, 2, 3, 4), 54321, 80, 1000, 0, 0x02, nil)
+	tun.readCh <- syn
+
+	select {
+	case rewritten := <-tun.writeCh:
+		require.GreaterOrEqual(t, len(rewritten), 40)
+		t.Logf("System stack rewritten TCP packet received: len=%d", len(rewritten))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for System stack rewritten TCP packet")
+	}
+}
+
+func TestMixedStack_Verification(t *testing.T) {
+	tun := newBenchGVisorTun("pipe_tun_mixed", 1500)
+	defer tun.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			b := buf.NewPacket()
+			defer b.Release()
+			for {
+				b.Reset()
+				_, err := conn.ReadPacket(b)
+				if err != nil {
+					return
+				}
+				received.Add(int64(b.Len()))
+			}
+		},
+	}
+	s, err := singtun.NewStack("mixed", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := []byte("hello mixed stack udp")
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+	tun.readCh <- pkt
+
+	require.Eventually(t, func() bool {
+		return received.Load() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Test TCP SYN packet rewrite by Mixed (System TCP engine)
+	syn := testBuildIPv4TCP(net.IPv4(10, 0, 0, 2), net.IPv4(1, 2, 3, 4), 54321, 80, 1000, 0, 0x02, nil)
+	tun.readCh <- syn
+
+	select {
+	case rewritten := <-tun.writeCh:
+		require.GreaterOrEqual(t, len(rewritten), 40)
+		t.Logf("Mixed stack rewritten TCP packet received: len=%d", len(rewritten))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Mixed stack rewritten TCP packet")
+	}
+}
+
+func TestLWIPStack_Verification(t *testing.T) {
+	tun := newPipeTun("pipe_tun_lwip")
+	defer tun.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			b := buf.NewPacket()
+			defer b.Release()
+			for {
+				b.Reset()
+				_, err := conn.ReadPacket(b)
+				if err != nil {
+					return
+				}
+				received.Add(int64(b.Len()))
+			}
+		},
+	}
+	s, err := NewLWIPStack(singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.2/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	defer s.Close()
+
+	// Test UDP
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := []byte("hello lwip stack udp")
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+	tun.readCh <- pkt
+
+	require.Eventually(t, func() bool {
+		return received.Load() > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Test TCP SYN -> SYN/ACK
+	syn := testBuildIPv4TCP(net.IPv4(10, 0, 0, 2), net.IPv4(1, 2, 3, 4), 54321, 80, 1000, 0, 0x02, nil)
+	tun.readCh <- syn
+
+	select {
+	case synAck := <-tun.writeCh:
+		require.GreaterOrEqual(t, len(synAck), 40)
+		t.Logf("lwIP stack SYN/ACK received: len=%d", len(synAck))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for lwIP stack SYN/ACK")
+	}
+}
+
 func BenchmarkStack_UDP_Throughput_gVisor(b *testing.B) {
 	tun := newBenchGVisorTun("bench_udp_gvisor", 1500)
 	defer tun.Close()
@@ -376,6 +560,118 @@ func BenchmarkStack_UDP_Throughput_lwIP(b *testing.B) {
 	require.NoError(b, err)
 	require.NoError(b, lStack.Start())
 	defer lStack.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := make([]byte, 1400)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		tun.readCh <- pkt
+	}
+}
+
+func BenchmarkStack_UDP_Throughput_System(b *testing.B) {
+	tun := newPipeTun("bench_udp_system")
+	defer tun.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			b := buf.NewPacket()
+			defer b.Release()
+			for {
+				b.Reset()
+				_, err := conn.ReadPacket(b)
+				if err != nil {
+					return
+				}
+				received.Add(int64(b.Len()))
+			}
+		},
+	}
+
+	s, err := singtun.NewStack("system", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(127, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := make([]byte, 1400)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		tun.readCh <- pkt
+	}
+}
+
+func BenchmarkStack_UDP_Throughput_Mixed(b *testing.B) {
+	tun := newBenchGVisorTun("bench_udp_mixed", 1500)
+	defer tun.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			b := buf.NewPacket()
+			defer b.Release()
+			for {
+				b.Reset()
+				_, err := conn.ReadPacket(b)
+				if err != nil {
+					return
+				}
+				received.Add(int64(b.Len()))
+			}
+		},
+	}
+
+	s, err := singtun.NewStack("mixed", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
 
 	clientIP := net.IPv4(10, 0, 0, 2)
 	serverIP := net.IPv4(8, 8, 8, 8)
@@ -588,6 +884,90 @@ func BenchmarkStack_TCP_Handshake_lwIP(b *testing.B) {
 		case <-tun.writeCh:
 		case <-time.After(500 * time.Millisecond):
 			b.Fatal("timeout waiting for SYN/ACK")
+		}
+	}
+}
+
+func BenchmarkStack_TCP_Handshake_System(b *testing.B) {
+	tun := newPipeTun("bench_tcp_system")
+	defer tun.Close()
+
+	bh := &benchHandler{}
+	s, err := singtun.NewStack("system", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(1, 2, 3, 4)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		clientPort := uint16(10000 + (i % 16))
+		syn := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1000, 0, 0x02, nil)
+		tun.readCh <- syn
+
+		select {
+		case <-tun.writeCh:
+		case <-time.After(500 * time.Millisecond):
+			b.Fatal("timeout waiting for System TCP rewrite response")
+		}
+	}
+}
+
+func BenchmarkStack_TCP_Handshake_Mixed(b *testing.B) {
+	tun := newBenchGVisorTun("bench_tcp_mixed", 1500)
+	defer tun.Close()
+
+	bh := &benchHandler{}
+	s, err := singtun.NewStack("mixed", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     tun,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("127.0.0.1/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(1, 2, 3, 4)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		clientPort := uint16(10000 + (i % 16))
+		syn := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1000, 0, 0x02, nil)
+		tun.readCh <- syn
+
+		select {
+		case <-tun.writeCh:
+		case <-time.After(500 * time.Millisecond):
+			b.Fatal("timeout waiting for Mixed TCP rewrite response")
 		}
 	}
 }

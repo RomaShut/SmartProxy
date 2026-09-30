@@ -38,5 +38,5 @@ jobs:
           cache: true
       - name: Run Go lwIP integration tests
         run: go test -v -tags "with_gvisor,with_lwip" -race -count=1 ./internal/tun/...
-      - name: Run stack speed & throughput benchmarks (gVisor vs lwIP)
+      - name: Run stack speed & throughput benchmarks (All 5 Stacks)
         run: go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/
