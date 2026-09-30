@@ -1054,14 +1054,40 @@ func (h *TUNHandler) handleDNS(ctx context.Context, conn N.PacketConn, host stri
 		buffer.Release()
 
 		if response != nil {
-			// Use buf.As instead of buf.With: With does not set end, so Bytes() returns an empty slice, which would write the DNS response as an empty datagram.
-			respBuf := buf.As(response)
+			// 必须经 dnsResponseBuffer 留出前导空间,不能直接 buf.As(response):
+			// TUN 包连接的写路径(sing-tun GoPacketConn.transmit)会对 buffer 调
+			// ExtendHeader(IP 头 + UDP 头,IPv4=28 / IPv6=48 字节)补包头,而 buf.As 产出的
+			// buffer start=0 没有任何前导空间,ExtendHeader 会 panic("buffer overflow:
+			// capacity N,start 0, need 28")。该 panic 被 safego 兜住不闪退,但 DNS 响应会被
+			// 静默丢弃,客户端只能等超时(实测 handleDNS 高频触发,capacity 52/78/230 都出现过)。
+			respBuf := dnsResponseBuffer(response)
 			if err := conn.WritePacket(respBuf, addr); err != nil {
 				ll.Debug("DNS write response failed", "error", err)
 			}
 			respBuf.Release()
 		}
 	}
+}
+
+// dnsResponseHeadroom 是 DNS 响应写回前必须预留的前导字节数:TUN 包连接写路径要补
+// IPv4/IPv6 头 + UDP 头(28 / 48 字节)。取 128 远大于实际所需(且给链路前缀留了余量),
+// 容量由本函数自行分配,不受 buf.UDPBufferSize 池上限约束。
+const dnsResponseHeadroom = 128
+
+// dnsResponseBuffer 把 DNS 响应 payload 拷进一个前导 dnsResponseHeadroom 字节的切片,
+// 用 buf.As 包装并 Advance 到 payload 起点后返回 —— 既让 ExtendHeader 有空间补包头,
+// 又保持"未托管 buffer、Release 是 no-op"的语义不变。
+//
+// 用 buf.As 而不是 buf.With:With 不设 end,Bytes() 返回空切片,会把 UDP 回包写成空数据报。
+// 用 buf.As 而不是 buf.NewPacket():这里是调用方自己 Release(见 handleDNS,以及
+// GoPacketConn.WritePacket 内部也 defer buffer.Release())——托管 buffer 在两条释放路径
+// 下会被重复放回池里,未托管 buffer 的 Release 是 no-op,不会踩这个雷。
+func dnsResponseBuffer(payload []byte) *buf.Buffer {
+	padded := make([]byte, dnsResponseHeadroom+len(payload))
+	copy(padded[dnsResponseHeadroom:], payload)
+	buffer := buf.As(padded)
+	buffer.Advance(dnsResponseHeadroom)
+	return buffer
 }
 
 var NewTUN = singtun.New
@@ -1206,11 +1232,17 @@ func (h *TUNHandler) Start(ctx context.Context, cfg config.TUNConfig) (singtun.T
 
 	// UDPTimeout/ICMPTimeout must be non-zero: sing-tun's UDP forwarder panics
 	// directly in udpnat2.New when timeout==0 (previously omitted, causing the TUN to fail to start).
+	//
+	// Logger 必须非 nil:sing-tun 的 go 栈在所有错误分支上无保护地调 stack.logger.*,
+	// StackOptions.Logger 在 sing-tun 内部也没有默认值兜底,传 nil 会让第一条错误日志
+	// 变成 nil interface 调用 → 引擎 goroutine 未捕获 panic → 进程 SIGABRT(停止 VPN
+	// 时必然触发)。详见 singlog.go 的类型注释。
 	stackOpts := singtun.StackOptions{
 		Context:        ctx,
 		Tun:            t,
 		TunOptions:     tunOpts,
 		Handler:        h,
+		Logger:         singLogger,
 		UDPTimeout:     5 * time.Minute,
 		ICMPTimeout:    30 * time.Second,
 		MemoryPressure: GetMemoryPressure,
