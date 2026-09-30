@@ -1,0 +1,29 @@
+name: lwIP backend
+
+on:
+  pull_request:
+    paths:
+      - 'internal/tun/lwip/**'
+      - 'third_party/lwip'
+      - '.gitmodules'
+      - '.github/workflows/lwip.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/tun/lwip/**'
+      - 'third_party/lwip'
+      - '.gitmodules'
+      - '.github/workflows/lwip.yml'
+
+jobs:
+  c-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build lwIP adapter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          ./internal/tun/lwip/build.sh
