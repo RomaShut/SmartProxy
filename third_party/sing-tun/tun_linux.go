@@ -32,6 +32,7 @@ var _ LinuxTUN = (*NativeTun)(nil)
 type NativeTun struct {
 	tunFd               int
 	tunFile             *os.File
+	previousFile        *os.File
 	iovecsOutputDefault []unix.Iovec
 	interfaceCallback   *list.Element[DefaultInterfaceUpdateCallback]
 	options             Options
@@ -442,7 +443,15 @@ func (t *NativeTun) Close() error {
 		}), common.Close(common.PtrOrNil(t.tunFile)))
 	}
 	if t.options.FileDescriptor > 0 && t.options.FileDescriptor != t.tunFd {
-		closeErr = E.Errors(closeErr, unix.Close(t.options.FileDescriptor))
+		if t.previousFile != nil {
+			closeErr = E.Errors(closeErr, t.previousFile.Close())
+			t.previousFile = nil
+		} else {
+			closeErr = E.Errors(closeErr, unix.Close(t.options.FileDescriptor))
+		}
+		if closeErr != nil && errors.Is(closeErr, unix.EBADF) {
+			closeErr = nil
+		}
 		t.options.FileDescriptor = 0
 	}
 	return closeErr
@@ -699,9 +708,9 @@ func (t *NativeTun) detachRuntimePoller() error {
 	if t.options.FileDescriptor != 0 {
 		// In Android VpnService fd mode, closing 'previous' during startup causes Android
 		// fdsan to abort with SIGABRT if tagged, and closes the interface prematurely.
-		// We clear its finalizer so runtime GC does not close it; the original fd will be
-		// cleanly closed upon t.Close().
-		runtime.SetFinalizer(previous, nil)
+		// Keep a reference in t.previousFile so runtime GC does not close it prematurely under -race;
+		// the original fd will be cleanly closed upon t.Close().
+		t.previousFile = previous
 		return err
 	}
 	return E.Errors(err, previous.Close())
