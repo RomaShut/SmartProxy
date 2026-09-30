@@ -1077,7 +1077,7 @@ func TestNativeTun_FdMode_Close(t *testing.T) {
 	assert.NoError(t, err)
 
 	// fds[0] should already be closed by tunDev.Close()
-	closeErr := unix.Close(fds[0])
+	_, closeErr := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0)
 	assert.Equal(t, unix.EBADF, closeErr, "fds[0] must already be closed by tunDev.Close")
 }
 
@@ -1114,6 +1114,6 @@ func TestNativeTun_GoStack_FdMode_Close(t *testing.T) {
 	assert.NoError(t, stack.Close())
 
 	// Both the duplicated fd and original fd should be closed
-	closeErr := unix.Close(fds[0])
+	_, closeErr := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0)
 	assert.Equal(t, unix.EBADF, closeErr, "original fd must be closed after tunDev.Close to prevent fd leaks")
 }

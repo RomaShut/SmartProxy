@@ -1,4 +1,4 @@
-//go:build !with_lwip
+//go:build !with_lwip || !cgo
 
 package lwip
 

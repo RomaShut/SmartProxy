@@ -1,10 +1,9 @@
-//go:build with_lwip
+//go:build with_lwip && cgo
 
 package lwip
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/c -I${SRCDIR}/c/arch -I${SRCDIR}/../../../third_party/lwip/src/include -DLWIP_NOASSERT -D_POSIX_C_SOURCE=200809L
-#cgo LDFLAGS: -L${SRCDIR}/c -lsmartproxy_lwip
 #include <stdint.h>
 #include "c/lwip_adapter.h"
 */
