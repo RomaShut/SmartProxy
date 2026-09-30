@@ -106,12 +106,12 @@
     <string name="cd_choose_tun_stack">Choose network stack</string>
     <string name="stack_gvisor">gVisor (Recommended / Non-root)</string>
     <string name="stack_lwip">lwIP (High Performance / Low Memory / Non-root)</string>
-    <string name="stack_go">Go (High Performance / Non-root)</string>
+    <string name="stack_go">Go (High Performance / Requires Root)</string>
     <string name="stack_system">System (Requires Root)</string>
     <string name="stack_mixed">Mixed (Requires Root)</string>
     <string name="stack_need_root_sub">Requires Root permission</string>
-    <string name="stack_non_root_hint">No Root permission detected; only gVisor, lwIP or Go stack is available</string>
-    <string name="toast_stack_need_root">This stack requires Root permission; non-root devices can only use gVisor, lwIP or Go</string>
+    <string name="stack_non_root_hint">No Root permission detected; only gVisor or lwIP stack is available</string>
+    <string name="toast_stack_need_root">This stack requires Root permission; non-root devices can only use gVisor or lwIP</string>
 
     <!-- Toasts / platform dialogs -->
     <string name="toast_no_upstream">No upstream proxy configured. Traffic cannot be forwarded — configure one in the admin panel.</string>

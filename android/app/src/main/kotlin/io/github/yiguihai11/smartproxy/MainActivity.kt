@@ -1329,7 +1329,7 @@ private fun ServiceModeDialog(
     onSave: (String, String) -> Unit
 ) {
     var selectedMode by remember { mutableStateOf(initialMode) }
-    var selectedStack by remember { mutableStateOf(if (!isRooted && initialStack != AppPrefs.STACK_GO && initialStack != AppPrefs.STACK_LWIP) AppPrefs.STACK_GVISOR else initialStack) }
+    var selectedStack by remember { mutableStateOf(if (!isRooted && initialStack != AppPrefs.STACK_LWIP) AppPrefs.STACK_GVISOR else initialStack) }
     var modeExpanded by remember { mutableStateOf(false) }
     var stackExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -1425,7 +1425,7 @@ private fun ServiceModeDialog(
                     }
                     DropdownMenu(expanded = stackExpanded && isVpn, onDismissRequest = { stackExpanded = false }) {
                         stackOptions.forEach { stack ->
-                            val canSelect = stack == AppPrefs.STACK_GVISOR || stack == AppPrefs.STACK_LWIP || stack == AppPrefs.STACK_GO || isRooted
+                            val canSelect = stack == AppPrefs.STACK_GVISOR || stack == AppPrefs.STACK_LWIP || isRooted
                             DropdownMenuItem(
                                 text = {
                                     Column {
