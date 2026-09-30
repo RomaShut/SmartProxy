@@ -27,7 +27,7 @@
 
 ## 📊 TUN 协议栈全量性能基准 (TUN Stacks Benchmark)
 
-SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限要求下灵活选用：
+SmartProxy 原生支持 5 种 TUN 协议栈实现，可在不同设备环境与权限要求下灵活选用：
 - **`lwip`**（移动端推荐）：轻量级 C 语言协议栈（Lightweight IP），零内存拷贝 + 极低 GC 压力，支持非 Root（Android VpnService）与 Linux/桌面环境。
 - **`gvisor`**（移动端默认）：Google gVisor 用户态 Go 协议栈，全平台成熟稳定，支持非 Root 与 Linux/桌面环境。
 - **`system`**：操作系统内核原生协议栈，TCP 直接交由主机内核网络栈处理，需 Root / 内核权限。
@@ -36,8 +36,18 @@ SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限�
 
 ### 1. UDP 吞吐量对比 (`BenchmarkStack_UDP_Throughput`)
 
-> 测试条件：1400 字节 UDP 包连续吞吐，统计单包纳秒延迟 (ns/op)、吞吐带宽 (MB/s)、堆内存消耗 (B/op) 与 Go 运行时分配次数 (allocs/op)。
+> 测试条件：1400 字节 UDP 包连续吞吐，统计单包延迟 (ns/op)、吞吐带宽 (MB/s)、单包堆内存消耗 (B/op) 与 Go 运行时分配次数 (allocs/op)。
 
+#### CI 云端测试环境 (Linux x86_64 / AMD EPYC 7763 64-Core)
+| 协议栈 | 特性分类 | 权限要求 | 单包耗时 (ns/op) | 吞吐量 (MB/s) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **77.0 ns** | **18,178 MB/s (18.1 GB/s)** | **0 B** | **0 allocs** |
+| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | **78.9 ns** | **17,744 MB/s (17.7 GB/s)** | **137 B** | **0 allocs** |
+| **`system`** | 主机内核原生协议栈 | 需 Root | 114.6 ns | 12,216 MB/s (12.2 GB/s) | 14 B | 0 allocs |
+| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | 3,666 ns | 381.9 MB/s | 432 B | 3 allocs |
+| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | 11,041 ns | 126.8 MB/s | 4,919 B | 0 allocs |
+
+#### 移动端真机测试环境 (Android / ARM64 Cortex)
 | 协议栈 | 特性分类 | 权限要求 | 单包耗时 (ns/op) | 吞吐量 (MB/s) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | **~174 ns** | **~8,028 MB/s (8.0 GB/s)** | **3 B** | **0 allocs** |
@@ -48,17 +58,17 @@ SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限�
 
 ### 2. TCP 握手与连接构建开销对比 (`BenchmarkStack_TCP_Handshake`)
 
-| 协议栈 | 特性分类 | 权限要求 | 握手/构建耗时 (ns/op) | 单连接堆内存 (B/op) | Go 堆分配 (allocs/op) |
+| 协议栈 | 特性分类 | 权限要求 | CI 握手耗时 (ns/op) | 单连接堆内存 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`system`** | 主机内核原生协议栈 | 需 Root | **~3,347 ns** | **376 B** | **5 allocs** |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | ~4,227 ns | 378 B | 5 allocs |
-| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | ~1,000,000 ns *(含步进调度)* | **441 B** | **7 allocs** |
-| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | ~43,260 ns | 2,050 B | 27 allocs |
-| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | ~527,526 ns | 672 B | 5 allocs |
+| **`system`** | 主机内核原生协议栈 | 需 Root | **2,484 ns** | **375 B** | **5 allocs** |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 2,509 ns | 375 B | 5 allocs |
+| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,411 ns *(含步进调度)* | **574 B** | **7 allocs** |
+| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | 22,553 ns | 2,042 B | 27 allocs |
+| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | 393,066 ns | 728 B | 5 allocs |
 
 > **性能关键发现**：
-> - **UDP 高吞吐场景**（如 DNS 解析、QUIC/HTTP3 流媒体、游戏联机）：`lwip` 展现出突破性的吞吐能力，单包耗时仅需 **174 ns**，速度达到 gVisor 的 **~27 倍**，且全程保持 **0 次 Go 运行时堆分配**。
-> - **内存 Footprint 与 GC 压制**：在非 Root 环境下，`lwip` 的 TCP 单连接内存开销仅为 `gvisor` 的 **~21%**（441 B vs 2050 B），GC 分配减少超过 **74%**（7 allocs vs 27 allocs），有效避免长驻后台时 Android 低内存杀进程（LMK）。
+> - **UDP 高吞吐场景**（如 DNS 解析、QUIC/HTTP3 流媒体、游戏联机）：`lwip` 展现出极其出色的吞吐能力，单包耗时仅需 **78 ns**（CI 云端）/ **174 ns**（手机端），速度达到 gVisor 的 **~27–46 倍**，且全程保持 **0 次 Go 运行时堆分配**。
+> - **内存 Footprint 与 GC 压制**：在非 Root 环境下，`lwip` 的 TCP 单连接内存开销仅为 `gvisor` 的 **~28%**（574 B vs 2042 B），GC 分配减少超过 **74%**（7 allocs vs 27 allocs），有效避免长驻后台时 Android 低内存杀进程（LMK）。
 
 ## 🛠️ 快速开始
 
