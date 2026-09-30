@@ -7,7 +7,6 @@ CFLAGS += -MMD -MP -Wno-unused-but-set-variable -Wno-unused-parameter
 CORE_SRCS := \
  $(LWIP_DIR)/src/core/init.c \
  $(LWIP_DIR)/src/core/def.c \
- $(LWIP_DIR)/src/core/dns.c \
  $(LWIP_DIR)/src/core/inet_chksum.c \
  $(LWIP_DIR)/src/core/ip.c \
  $(LWIP_DIR)/src/core/mem.c \
