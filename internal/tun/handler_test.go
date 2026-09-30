@@ -18,6 +18,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"golang.org/x/sys/unix"
 
 	"smartproxy/internal/chnroute"
 	"smartproxy/internal/config"
@@ -948,6 +949,52 @@ func TestRemoteUDPReader_WritesNonEmptyPayload(t *testing.T) {
 	if !bytes.Equal(captured.Bytes(), payload) {
 		t.Fatalf("reply content = %q, want %q", captured.Bytes(), payload)
 	}
+
+	// TUN 包连接写路径(sing-tun GoPacketConn.transmit)会对 buffer 调 ExtendHeader 补包头(28 / 48 字节),
+	// 验证代理回包预留了足够的前导空间且 ExtendHeader 不会 panic。
+	assert.GreaterOrEqual(t, captured.Start(), 48, "tun reply buffer must have headroom for IP+UDP headers")
+	assert.NotPanics(t, func() {
+		header := captured.ExtendHeader(28)
+		assert.Len(t, header, 28)
+	}, "ExtendHeader must not panic on captured proxy buffer")
+}
+
+func TestRemoteUDPReader_Direct_HeaderHeadroom(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	payload := []byte("direct-quic-reply")
+	go func() {
+		server.Write(payload)
+		server.Close()
+	}()
+
+	tunConn := new(MockPacketConn)
+	var captured *buf.Buffer
+	tunConn.On("WritePacket", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		captured = args.Get(0).(*buf.Buffer)
+	}).Return(nil)
+
+	entry := &udpRemoteEntry{
+		conn:    client,
+		dst:     M.Socksaddr{Addr: netip.MustParseAddr("1.1.1.1"), Port: 443},
+		isProxy: false,
+	}
+	errCh := make(chan error, 1)
+	h := &TUNHandler{}
+	h.remoteUDPReader(slog.Default(), tunConn, entry, errCh)
+
+	assert.NotNil(t, captured)
+	if captured == nil {
+		t.Fatal("no WritePacket call captured")
+	}
+	assert.Equal(t, payload, captured.Bytes())
+	assert.GreaterOrEqual(t, captured.Start(), 48)
+	assert.NotPanics(t, func() {
+		header := captured.ExtendHeader(48) // IPv6(40) + UDP(8)
+		assert.Len(t, header, 48)
+	}, "ExtendHeader must not panic on captured direct buffer")
 }
 
 func TestTUNHandler_BypassLAN_ExcludesUDP53(t *testing.T) {
@@ -984,3 +1031,61 @@ func TestTUNHandler_BypassLAN_ExcludesUDP53(t *testing.T) {
 	}
 }
 
+func TestNativeTun_FdMode_Close(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+		t.Skip("NativeTun fd mode test is for Linux/Android")
+	}
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	assert.NoError(t, err)
+	defer unix.Close(fds[1])
+
+	tunDev, err := singtun.New(singtun.Options{
+		FileDescriptor: fds[0],
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, tunDev)
+
+	err = tunDev.Close()
+	assert.NoError(t, err)
+
+	// fds[0] should already be closed by tunDev.Close()
+	closeErr := unix.Close(fds[0])
+	assert.Equal(t, unix.EBADF, closeErr, "fds[0] must already be closed by tunDev.Close")
+}
+
+func TestNativeTun_GoStack_FdMode_Close(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+		t.Skip("NativeTun fd mode test is for Linux/Android")
+	}
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	assert.NoError(t, err)
+	defer unix.Close(fds[1])
+
+	tunDev, err := singtun.New(singtun.Options{
+		FileDescriptor: fds[0],
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, tunDev)
+
+	stack, err := singtun.NewStack("go", singtun.StackOptions{
+		Context:        context.Background(),
+		Tun:            tunDev,
+		TunOptions:     singtun.Options{FileDescriptor: fds[0]},
+		Logger:         singLogger,
+		UDPTimeout:     5 * time.Minute,
+		ICMPTimeout:    30 * time.Second,
+		MemoryPressure: GetMemoryPressure,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, stack)
+
+	assert.NoError(t, stack.Start())
+
+	// Closing tunDev followed by stack.Close (mirroring engine.Stop order)
+	assert.NoError(t, tunDev.Close())
+	assert.NoError(t, stack.Close())
+
+	// Both the duplicated fd and original fd should be closed
+	closeErr := unix.Close(fds[0])
+	assert.Equal(t, unix.EBADF, closeErr, "original fd must be closed after tunDev.Close to prevent fd leaks")
+}

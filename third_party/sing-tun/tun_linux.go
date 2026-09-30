@@ -429,16 +429,23 @@ func (t *NativeTun) Close() error {
 	if t.interfaceCallback != nil {
 		t.options.InterfaceMonitor.UnregisterCallback(t.interfaceCallback)
 	}
+	var closeErr error
 	if t.options.EXP_ExternalConfiguration {
-		return common.Close(common.PtrOrNil(t.tunFile))
+		closeErr = common.Close(common.PtrOrNil(t.tunFile))
+	} else {
+		if t.options.DNSMode != DNSModeDisabled && t.options.NetNs == "" {
+			t.unsetSearchDomainForSystemdResolved()
+		}
+		closeErr = E.Errors(runInNetworkNamespace(t.options.NetNs, func() error {
+			t.unsetAddresses()
+			return E.Errors(t.unsetRoute(), t.unsetRules())
+		}), common.Close(common.PtrOrNil(t.tunFile)))
 	}
-	if t.options.DNSMode != DNSModeDisabled && t.options.NetNs == "" {
-		t.unsetSearchDomainForSystemdResolved()
+	if t.options.FileDescriptor > 0 && t.options.FileDescriptor != t.tunFd {
+		closeErr = E.Errors(closeErr, unix.Close(t.options.FileDescriptor))
+		t.options.FileDescriptor = 0
 	}
-	return E.Errors(runInNetworkNamespace(t.options.NetNs, func() error {
-		t.unsetAddresses()
-		return E.Errors(t.unsetRoute(), t.unsetRules())
-	}), common.Close(common.PtrOrNil(t.tunFile)))
+	return closeErr
 }
 
 func (t *NativeTun) Read(p []byte) (n int, err error) {
@@ -690,10 +697,10 @@ func (t *NativeTun) detachRuntimePoller() error {
 	t.tunFile = newUnpolledFile(duplicated, "tun")
 	t.readRawConn, err = t.tunFile.SyscallConn()
 	if t.options.FileDescriptor != 0 {
-		// In Android VpnService fd mode, the host owns the original file descriptor.
-		// Closing 'previous' causes Android fdsan to abort with SIGABRT due to closing
-		// a foreign/tagged fd, and closes the VpnService interface. We clear its finalizer
-		// and leave the original fd unclosed.
+		// In Android VpnService fd mode, closing 'previous' during startup causes Android
+		// fdsan to abort with SIGABRT if tagged, and closes the interface prematurely.
+		// We clear its finalizer so runtime GC does not close it; the original fd will be
+		// cleanly closed upon t.Close().
 		runtime.SetFinalizer(previous, nil)
 		return err
 	}
