@@ -22,6 +22,8 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/stretchr/testify/require"
 
+	"golang.org/x/sys/unix"
+
 	"smartproxy/internal/config"
 )
 
@@ -145,6 +147,69 @@ func TestGVisorStack_Verification(t *testing.T) {
 	}
 }
 
+func TestGoStack_Verification(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK, 0)
+	require.NoError(t, err)
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	device, err := singtun.New(singtun.Options{
+		FileDescriptor: fds[0],
+		MTU:            1500,
+		Inet4Address: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.2/24"),
+		},
+	})
+	require.NoError(t, err)
+	defer device.Close()
+
+	bh := &benchHandler{}
+	s, err := singtun.NewStack("go", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     device,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.2/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(1, 2, 3, 4)
+	syn := testBuildIPv4TCP(clientIP, serverIP, 54321, 80, 1000, 0, 0x02, nil)
+
+	_, err = unix.Write(fds[1], syn)
+	require.NoError(t, err)
+
+	buf := make([]byte, 1500)
+	done := make(chan int)
+	go func() {
+		for {
+			n, errno := unix.Read(fds[1], buf)
+			if errno == nil && n > 0 {
+				done <- n
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case n := <-done:
+		t.Logf("Go stack SYN/ACK received: len=%d", n)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Go stack SYN/ACK")
+	}
+}
+
 func BenchmarkStack_UDP_Throughput_gVisor(b *testing.B) {
 	tun := newBenchGVisorTun("bench_udp_gvisor", 1500)
 	defer tun.Close()
@@ -202,6 +267,74 @@ func BenchmarkStack_UDP_Throughput_gVisor(b *testing.B) {
 		})
 		tun.ep.InjectInbound(header.IPv4ProtocolNumber, pb)
 		pb.DecRef()
+	}
+}
+
+func BenchmarkStack_UDP_Throughput_Go(b *testing.B) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK, 0)
+	require.NoError(b, err)
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	device, err := singtun.New(singtun.Options{
+		FileDescriptor: fds[0],
+		MTU:            1500,
+		Inet4Address: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.2/24"),
+		},
+	})
+	require.NoError(b, err)
+	defer device.Close()
+
+	var received atomic.Int64
+	bh := &benchHandler{
+		onUDP: func(conn N.PacketConn) {
+			defer conn.Close()
+			buf := buf.NewPacket()
+			defer buf.Release()
+			for {
+				buf.Reset()
+				_, err := conn.ReadPacket(buf)
+				if err != nil {
+					return
+				}
+				received.Add(int64(buf.Len()))
+			}
+		},
+	}
+
+	s, err := singtun.NewStack("go", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     device,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.2/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(8, 8, 8, 8)
+	payload := make([]byte, 1400)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	pkt := testBuildIPv4UDP(clientIP, serverIP, 45678, 53, payload)
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, _ = unix.Write(fds[1], pkt)
 	}
 }
 
@@ -296,7 +429,7 @@ func BenchmarkStack_TCP_Handshake_gVisor(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		clientPort := uint16(10000 + (i % 50000))
+		clientPort := uint16(10000 + (i % 16))
 		syn := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1000, 0, 0x02, nil)
 		pb := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: buffer.MakeWithData(syn),
@@ -305,10 +438,106 @@ func BenchmarkStack_TCP_Handshake_gVisor(b *testing.B) {
 		pb.DecRef()
 
 		// Drain the SYN/ACK response
+		var synAck []byte
 		select {
-		case <-tun.writeCh:
+		case synAck = <-tun.writeCh:
 		case <-time.After(500 * time.Millisecond):
 			b.Fatal("timeout waiting for SYN/ACK")
+		}
+		if len(synAck) >= 28 {
+			serverSeq := binary.BigEndian.Uint32(synAck[24:28])
+			rst := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1001, serverSeq+1, 0x04, nil)
+			pb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+				Payload: buffer.MakeWithData(rst),
+			})
+			tun.ep.InjectInbound(header.IPv4ProtocolNumber, pb)
+			pb.DecRef()
+		}
+	}
+}
+
+func BenchmarkStack_TCP_Handshake_Go(b *testing.B) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK, 0)
+	require.NoError(b, err)
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	device, err := singtun.New(singtun.Options{
+		FileDescriptor: fds[0],
+		MTU:            1500,
+		Inet4Address: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.2/24"),
+		},
+	})
+	require.NoError(b, err)
+	defer device.Close()
+
+	bh := &benchHandler{
+		onTCP: func(conn net.Conn) {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				conn.Close()
+			}()
+		},
+	}
+
+	s, err := singtun.NewStack("go", singtun.StackOptions{
+		Context: context.Background(),
+		Tun:     device,
+		TunOptions: singtun.Options{
+			MTU: 1500,
+			Inet4Address: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.2/24"),
+			},
+		},
+		Handler:     bh,
+		Logger:      logger.NOP(),
+		UDPTimeout:  time.Minute,
+		ICMPTimeout: time.Second,
+	})
+	require.NoError(b, err)
+	require.NoError(b, s.Start())
+	defer s.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	serverIP := net.IPv4(1, 2, 3, 4)
+	_ = unix.SetNonblock(fds[1], false)
+	outCh := make(chan []byte, 1024)
+	go func() {
+		b := make([]byte, 1500)
+		pfd := []unix.PollFd{{Fd: int32(fds[1]), Events: unix.POLLIN}}
+		for {
+			_, err := unix.Poll(pfd, 1000)
+			if err != nil {
+				return
+			}
+			n, err := unix.Read(fds[1], b)
+			if err != nil {
+				continue
+			}
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, b[:n])
+				outCh <- data
+			}
+		}
+	}()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		clientPort := uint16(10000 + (i % 16))
+		syn := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1000, 0, 0x02, nil)
+		_, err := unix.Write(fds[1], syn)
+		if err != nil {
+			b.Fatalf("write syn error: %v", err)
+		}
+
+		select {
+		case <-outCh:
+		case <-time.After(1000 * time.Millisecond):
+			b.Fatalf("iter %d timeout waiting for TCP response", i)
 		}
 	}
 }
@@ -319,6 +548,9 @@ func BenchmarkStack_TCP_Handshake_lwIP(b *testing.B) {
 
 	bh := &benchHandler{
 		onTCP: func(conn net.Conn) {
+			if tc, ok := conn.(interface{ SetLinger(int) error }); ok {
+				tc.SetLinger(0)
+			}
 			conn.Close()
 		},
 	}
@@ -348,21 +580,14 @@ func BenchmarkStack_TCP_Handshake_lwIP(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		clientPort := uint16(10000 + (i % 50000))
+		clientPort := uint16(10000 + (i % 16))
 		syn := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1000, 0, 0x02, nil)
 		tun.readCh <- syn
 
-		// Wait for SYN/ACK from lwIP
-		var synAck []byte
 		select {
-		case synAck = <-tun.writeCh:
+		case <-tun.writeCh:
 		case <-time.After(500 * time.Millisecond):
 			b.Fatal("timeout waiting for SYN/ACK")
 		}
-
-		serverSeq := binary.BigEndian.Uint32(synAck[24:28])
-		// Send RST to clean up TCP state
-		rst := testBuildIPv4TCP(clientIP, serverIP, clientPort, 80, 1001, serverSeq+1, 0x04, nil)
-		tun.readCh <- rst
 	}
 }

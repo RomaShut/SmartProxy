@@ -29,8 +29,8 @@ type pipeTun struct {
 
 func newPipeTun(name string) *pipeTun {
 	return &pipeTun{
-		readCh:  make(chan []byte, 128),
-		writeCh: make(chan []byte, 128),
+		readCh:  make(chan []byte, 4096),
+		writeCh: make(chan []byte, 4096),
 		name:    name,
 	}
 }
