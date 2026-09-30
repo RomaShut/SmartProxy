@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -132,6 +133,7 @@ func (s *LWIPStack) Start() error {
 		return fmt.Errorf("init lwip engine: %w", err)
 	}
 	s.engine = eng
+	slog.Info("lwIP network stack engine initialized", "tun", s.tunOptions.Name, "mtu", s.tunOptions.MTU)
 
 	s.wg.Add(1)
 	safego.Go("tun.lwip.readLoop", func() {
@@ -180,6 +182,7 @@ func (s *LWIPStack) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
+	slog.Info("lwIP network stack engine closing")
 	close(s.doneChan)
 	var errs []error
 	if s.engine != nil {
