@@ -394,6 +394,10 @@ func TestTUNHandler_Start_FdMode_MTUDefault(t *testing.T) {
 		return mockTun, nil
 	}
 	NewTUNStack = func(stackType string, opts singtun.StackOptions) (singtun.Stack, error) {
+		// Logger 必须传下去:sing-tun 的 go 栈在所有错误分支上无保护地调
+		// stack.logger.*,传 nil 时第一条错误日志就是 nil interface 调用 → 引擎
+		// goroutine 未捕获 panic → 进程 SIGABRT(停止 VPN 必现)。见 singlog.go。
+		assert.NotNil(t, opts.Logger, "StackOptions.Logger must not be nil")
 		return mockStack, nil
 	}
 
@@ -411,6 +415,53 @@ func TestTUNHandler_Start_FdMode_MTUDefault(t *testing.T) {
 	assert.NoError(t, err)
 	mockTun.AssertExpectations(t)
 	mockStack.AssertExpectations(t)
+}
+
+// TestDNSResponseBuffer_HeaderHeadroom 锁住 handleDNS 写回 DNS 响应的 headroom 要求。
+//
+// 旧实现直接 buf.As(response):start=0 没有前导空间,而 TUN 包连接的写路径
+// (sing-tun GoPacketConn.transmit)会对 buffer 调 ExtendHeader(IP 头 + UDP 头)补包头
+// → panic "buffer overflow: capacity N,start 0, need 28"。该 panic 被 safego 兜住所以
+// 不闪退,但 DNS 响应被静默丢弃、客户端只能等超时(实测高频触发)。
+// 这里直接复现 ExtendHeader 这一步:没有 headroom 就会 panic。
+func TestDNSResponseBuffer_HeaderHeadroom(t *testing.T) {
+	payload := []byte{0xde, 0xad, 0xbe, 0xef}
+	for _, tc := range []struct {
+		name         string
+		headerLength int
+	}{
+		{"IPv4UDP", 28}, // IPv4(20) + UDP(8)
+		{"IPv6UDP", 48}, // IPv6(40) + UDP(8)
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := dnsResponseBuffer(payload)
+			assert.Equal(t, payload, buffer.Bytes(), "payload must sit at the buffer's start")
+
+			assert.NotPanics(t, func() {
+				header := buffer.ExtendHeader(tc.headerLength)
+				assert.Len(t, header, tc.headerLength)
+			}, "ExtendHeader must have headroom reserved")
+
+			assert.Equal(t, dnsResponseHeadroom-tc.headerLength, buffer.Start())
+			assert.Equal(t, tc.headerLength+len(payload), buffer.Len())
+			assert.Equal(t, payload, buffer.Bytes()[tc.headerLength:])
+		})
+	}
+}
+
+// TestSingLogger_NotNil 锁住"喂给 sing-tun 的 Logger 不能是 nil"这条不变量。
+// 换成 logger.NOP() 之类也满足这里的断言,但它至少挡住"忘了传"这个真实故障模式。
+func TestSingLogger_NotNil(t *testing.T) {
+	assert.NotNil(t, singLogger)
+
+	// 各级别调用都不能 panic(nil interface 调用正是本次闪退的直接原因)。
+	assert.NotPanics(t, func() {
+		singLogger.Trace("trace", " message")
+		singLogger.Debug("debug", " message")
+		singLogger.Info("info", " message")
+		singLogger.Warn("warn", " message")
+		singLogger.Error("error", " message")
+	})
 }
 
 func TestTUNHandler_Start_FdMode_NoAddresses(t *testing.T) {
