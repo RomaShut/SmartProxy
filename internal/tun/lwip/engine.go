@@ -50,6 +50,7 @@ type Config struct {
 	Gateway    net.IP
 	OutputFn   func(packet []byte)
 	TCPHandler func(conn net.Conn)
+	UDPHandler func(conn *PacketConn)
 }
 
 // Engine manages the lwIP stack and runs the single owner goroutine.
@@ -63,8 +64,9 @@ type Engine struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	// conns is accessed strictly within the single owner goroutine
-	conns map[uint64]*Conn
+	// conns and udpConns are accessed strictly within the single owner goroutine
+	conns    map[uint64]*Conn
+	udpConns map[uint64]*PacketConn
 }
 
 // NewEngine initializes and starts an lwIP engine.
@@ -85,6 +87,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 		cmdChan:   make(chan any, 1024),
 		doneChan:  make(chan struct{}),
 		conns:     make(map[uint64]*Conn),
+		udpConns:  make(map[uint64]*PacketConn),
 	}
 
 	e.id = registerEngine(e)
@@ -175,6 +178,13 @@ func (e *Engine) postClose(connID uint64) {
 func (e *Engine) postAbort(connID uint64) {
 	select {
 	case e.cmdChan <- &abortCmd{connID: connID}:
+	case <-e.doneChan:
+	}
+}
+
+func (e *Engine) postUDPClose(connID uint64) {
+	select {
+	case e.cmdChan <- &closeUDPCmd{connID: connID}:
 	case <-e.doneChan:
 	}
 }

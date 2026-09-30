@@ -43,6 +43,27 @@ static void on_err(uint64_t conn_id, int err, uint64_t ctx_id) {
     (void)conn_id; (void)err; (void)ctx_id;
 }
 
+static uint64_t g_udp_recv_id = 0;
+static uint16_t g_udp_recv_src_port = 0;
+static uint16_t g_udp_recv_dst_port = 0;
+static uint8_t g_last_udp_data[1500];
+static uint16_t g_last_udp_len = 0;
+
+static void on_udp_recv(uint64_t conn_id, int is_ipv6,
+                        const void *src_ip, uint16_t src_port,
+                        const void *dst_ip, uint16_t dst_port,
+                        const uint8_t *data, uint16_t len,
+                        uint64_t ctx_id) {
+    (void)is_ipv6; (void)src_ip; (void)dst_ip; (void)ctx_id;
+    g_udp_recv_id = conn_id;
+    g_udp_recv_src_port = src_port;
+    g_udp_recv_dst_port = dst_port;
+    if (len <= sizeof(g_last_udp_data)) {
+        memcpy(g_last_udp_data, data, len);
+        g_last_udp_len = len;
+    }
+}
+
 static uint32_t build_ipv4_tcp(uint8_t *buf,
                                uint32_t src_ip, uint16_t src_port,
                                uint32_t dst_ip, uint16_t dst_port,
@@ -87,6 +108,41 @@ static uint32_t build_ipv4_tcp(uint8_t *buf,
     return total_len;
 }
 
+static uint32_t build_ipv4_udp(uint8_t *buf,
+                               uint32_t src_ip, uint16_t src_port,
+                               uint32_t dst_ip, uint16_t dst_port,
+                               const uint8_t *payload, uint16_t payload_len) {
+    uint16_t total_len = 20 + 8 + payload_len;
+    memset(buf, 0, total_len);
+
+    // IPv4 Header
+    buf[0] = 0x45;
+    buf[1] = 0x00;
+    buf[2] = (uint8_t)(total_len >> 8);
+    buf[3] = (uint8_t)(total_len & 0xFF);
+    buf[4] = 0x56; buf[5] = 0x78;
+    buf[6] = 0x40; buf[7] = 0x00;
+    buf[8] = 64;
+    buf[9] = 17; // Protocol = UDP
+    memcpy(buf + 12, &src_ip, 4);
+    memcpy(buf + 16, &dst_ip, 4);
+
+    // UDP Header
+    buf[20] = (uint8_t)(src_port >> 8);
+    buf[21] = (uint8_t)(src_port & 0xFF);
+    buf[22] = (uint8_t)(dst_port >> 8);
+    buf[23] = (uint8_t)(dst_port & 0xFF);
+    uint16_t udp_len = 8 + payload_len;
+    buf[24] = (uint8_t)(udp_len >> 8);
+    buf[25] = (uint8_t)(udp_len & 0xFF);
+    buf[26] = 0; buf[27] = 0; // Checksum 0 is allowed in IPv4 UDP
+
+    if (payload && payload_len > 0) {
+        memcpy(buf + 28, payload, payload_len);
+    }
+    return total_len;
+}
+
 int main(void) {
     struct sp_lwip lw;
     memset(&lw, 0, sizeof(lw));
@@ -95,6 +151,7 @@ int main(void) {
     lw.tcp_recv = on_recv;
     lw.tcp_sent = on_sent;
     lw.tcp_err = on_err;
+    lw.udp_recv = on_udp_recv;
 
     ip4_addr_t ip, mask, gw;
     IP4_ADDR(&ip, 10, 0, 0, 2);
@@ -177,8 +234,69 @@ int main(void) {
         return 1;
     }
 
+    // Test 5: UDP datagram from client (10.0.0.2:53000) to DNS (8.8.8.8:53)
+    uint32_t dns_ip;
+    IP4_ADDR((ip4_addr_t *)&dns_ip, 8, 8, 8, 8);
+    const char *dns_query = "PING_UDP";
+    pkt_len = build_ipv4_udp(packet, client_ip, 53000, dns_ip, 53, (const uint8_t *)dns_query, strlen(dns_query));
+
+    g_udp_recv_id = 0;
+    g_udp_recv_src_port = 0;
+    g_udp_recv_dst_port = 0;
+    g_last_udp_len = 0;
+
+    err = sp_lwip_input(&lw, packet, pkt_len);
+    if (err != 0) {
+        fprintf(stderr, "sp_lwip_input UDP failed: %d\n", err);
+        return 1;
+    }
+
+    if (g_udp_recv_id == 0) {
+        fprintf(stderr, "expected UDP datagram received, but on_udp_recv was not called\n");
+        return 1;
+    }
+    if (g_udp_recv_src_port != 53000 || g_udp_recv_dst_port != 53) {
+        fprintf(stderr, "UDP ports mismatch: src=%u (want 53000), dst=%u (want 53)\n", g_udp_recv_src_port, g_udp_recv_dst_port);
+        return 1;
+    }
+    if (g_last_udp_len != strlen(dns_query) || memcmp(g_last_udp_data, dns_query, strlen(dns_query)) != 0) {
+        fprintf(stderr, "UDP payload mismatch\n");
+        return 1;
+    }
+
+    // Test 6: Reply to UDP client pretending to be 8.8.8.8:53
+    int before_udp_reply_outputs = g_output_packets;
+    const char *dns_resp = "PONG_UDP";
+    int u_sent = sp_lwip_udp_send(&lw, g_udp_recv_id, 0, &dns_ip, 53, dns_resp, strlen(dns_resp));
+    if (u_sent != (int)strlen(dns_resp)) {
+        fprintf(stderr, "sp_lwip_udp_send failed: %d\n", u_sent);
+        return 1;
+    }
+    if (g_output_packets <= before_udp_reply_outputs) {
+        fprintf(stderr, "expected UDP reply output packet, but none sent\n");
+        return 1;
+    }
+
+    // Verify output packet: IPv4 (protocol 17 at byte 9), source 8.8.8.8:53, destination 10.0.0.2:53000
+    if (g_last_output[9] != 17) {
+        fprintf(stderr, "expected UDP output (proto 17), got %u\n", g_last_output[9]);
+        return 1;
+    }
+    uint16_t resp_src_port = ((uint16_t)g_last_output[20] << 8) | g_last_output[21];
+    uint16_t resp_dst_port = ((uint16_t)g_last_output[22] << 8) | g_last_output[23];
+    if (resp_src_port != 53 || resp_dst_port != 53000) {
+        fprintf(stderr, "UDP response port mismatch: src=%u (want 53), dst=%u (want 53000)\n", resp_src_port, resp_dst_port);
+        return 1;
+    }
+
+    // Test 7: Close UDP connection
+    if (sp_lwip_udp_close(&lw, g_udp_recv_id) != 0) {
+        fprintf(stderr, "sp_lwip_udp_close failed\n");
+        return 1;
+    }
+
     sp_lwip_free(&lw);
 
-    puts("smartproxy lwIP smoke test: ALL PASSED (TCP SYN/ACK/ACK/DATA/CLOSE verified)");
+    puts("smartproxy lwIP smoke test: ALL PASSED (TCP SYN/ACK/ACK/DATA/CLOSE and UDP RECV/SEND/CLOSE verified)");
     return 0;
 }

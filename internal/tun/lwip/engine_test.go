@@ -5,10 +5,14 @@ package lwip
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing/common/buf"
 )
 
 func checksum(b []byte) uint16 {
@@ -23,6 +27,113 @@ func checksum(b []byte) uint16 {
 		sum = (sum >> 16) + (sum & 0xffff)
 	}
 	return ^uint16(sum)
+}
+
+func calcIPv6UpperChecksum(srcIP, dstIP net.IP, nextHeader uint8, upperPayload []byte) uint16 {
+	pseudoLen := 16 + 16 + 4 + 4 + len(upperPayload)
+	pseudo := make([]byte, pseudoLen)
+	copy(pseudo[0:16], srcIP.To16())
+	copy(pseudo[16:32], dstIP.To16())
+	binary.BigEndian.PutUint32(pseudo[32:36], uint32(len(upperPayload)))
+	pseudo[39] = nextHeader
+	copy(pseudo[40:], upperPayload)
+	c := checksum(pseudo)
+	if c == 0 {
+		return 0xffff
+	}
+	return c
+}
+
+func buildIPv4UDP(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
+	totalLen := 20 + 8 + len(payload)
+	pkt := make([]byte, totalLen)
+
+	// IPv4 Header
+	pkt[0] = 0x45
+	pkt[1] = 0x00
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(totalLen))
+	binary.BigEndian.PutUint16(pkt[4:6], 0x5678)
+	pkt[6] = 0x40
+	pkt[7] = 0x00
+	pkt[8] = 64
+	pkt[9] = 17 // UDP
+	copy(pkt[12:16], srcIP.To4())
+	copy(pkt[16:20], dstIP.To4())
+	binary.BigEndian.PutUint16(pkt[10:12], checksum(pkt[0:20]))
+
+	// UDP Header
+	binary.BigEndian.PutUint16(pkt[20:22], srcPort)
+	binary.BigEndian.PutUint16(pkt[22:24], dstPort)
+	binary.BigEndian.PutUint16(pkt[24:26], uint16(8+len(payload)))
+	pkt[26] = 0
+	pkt[27] = 0
+
+	if len(payload) > 0 {
+		copy(pkt[28:], payload)
+	}
+	return pkt
+}
+
+func buildIPv6TCP(srcIP, dstIP net.IP, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
+	tcpLen := 20 + len(payload)
+	totalLen := 40 + tcpLen
+	pkt := make([]byte, totalLen)
+
+	// IPv6 Header
+	pkt[0] = 0x60 // Version 6
+	binary.BigEndian.PutUint16(pkt[4:6], uint16(tcpLen))
+	pkt[6] = 6 // Next header: TCP
+	pkt[7] = 64 // Hop limit
+	copy(pkt[8:24], srcIP.To16())
+	copy(pkt[24:40], dstIP.To16())
+
+	// TCP Header
+	tcpHeader := pkt[40:]
+	binary.BigEndian.PutUint16(tcpHeader[0:2], srcPort)
+	binary.BigEndian.PutUint16(tcpHeader[2:4], dstPort)
+	binary.BigEndian.PutUint32(tcpHeader[4:8], seq)
+	binary.BigEndian.PutUint32(tcpHeader[8:12], ack)
+	tcpHeader[12] = 0x50 // Data offset 5 (20 bytes)
+	tcpHeader[13] = flags
+	binary.BigEndian.PutUint16(tcpHeader[14:16], 65535)
+
+	if len(payload) > 0 {
+		copy(tcpHeader[20:], payload)
+	}
+
+	chk := calcIPv6UpperChecksum(srcIP, dstIP, 6, tcpHeader)
+	binary.BigEndian.PutUint16(tcpHeader[16:18], chk)
+
+	return pkt
+}
+
+func buildIPv6UDP(srcIP, dstIP net.IP, srcPort, dstPort uint16, payload []byte) []byte {
+	udpLen := 8 + len(payload)
+	totalLen := 40 + udpLen
+	pkt := make([]byte, totalLen)
+
+	// IPv6 Header
+	pkt[0] = 0x60
+	binary.BigEndian.PutUint16(pkt[4:6], uint16(udpLen))
+	pkt[6] = 17 // Next header: UDP
+	pkt[7] = 64 // Hop limit
+	copy(pkt[8:24], srcIP.To16())
+	copy(pkt[24:40], dstIP.To16())
+
+	// UDP Header
+	udpHeader := pkt[40:]
+	binary.BigEndian.PutUint16(udpHeader[0:2], srcPort)
+	binary.BigEndian.PutUint16(udpHeader[2:4], dstPort)
+	binary.BigEndian.PutUint16(udpHeader[4:6], uint16(udpLen))
+
+	if len(payload) > 0 {
+		copy(udpHeader[8:], payload)
+	}
+
+	chk := calcIPv6UpperChecksum(srcIP, dstIP, 17, udpHeader)
+	binary.BigEndian.PutUint16(udpHeader[6:8], chk)
+
+	return pkt
 }
 
 func buildIPv4TCP(srcIP, dstIP net.IP, srcPort, dstPort uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
@@ -426,6 +537,440 @@ func TestEngine_TCP_Backpressure(t *testing.T) {
 
 	if receivedBytes != len(largePayload) {
 		t.Fatalf("received bytes mismatch: %d vs %d", receivedBytes, len(largePayload))
+	}
+}
+
+func TestEngine_UDP_Echo(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+	udpChan := make(chan *PacketConn, 1)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+		UDPHandler: func(conn *PacketConn) {
+			udpChan <- conn
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	targetIP := net.IPv4(8, 8, 8, 8)
+	clientPort := uint16(40001)
+	targetPort := uint16(53)
+
+	// Inject UDP packet from client to 8.8.8.8:53
+	queryData := []byte("PING_UDP_PAYLOAD")
+	pkt := buildIPv4UDP(clientIP, targetIP, clientPort, targetPort, queryData)
+	if err := engine.Input(pkt); err != nil {
+		t.Fatalf("Input failed: %v", err)
+	}
+
+	var pconn *PacketConn
+	select {
+	case pconn = <-udpChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for UDPHandler")
+	}
+
+	// Verify endpoints
+	if pconn.LocalAddr().String() != "10.0.0.2:40001" {
+		t.Errorf("expected LocalAddr 10.0.0.2:40001, got %s", pconn.LocalAddr())
+	}
+	if pconn.RemoteAddr().String() != "8.8.8.8:53" {
+		t.Errorf("expected RemoteAddr 8.8.8.8:53, got %s", pconn.RemoteAddr())
+	}
+	if pconn.Source().Addr.String() != "10.0.0.2" || pconn.Source().Port != 40001 {
+		t.Errorf("expected Source 10.0.0.2:40001, got %s", pconn.Source())
+	}
+	if pconn.Destination().Addr.String() != "8.8.8.8" || pconn.Destination().Port != 53 {
+		t.Errorf("expected Destination 8.8.8.8:53, got %s", pconn.Destination())
+	}
+
+	// Read packet using ReadPacket
+	b := buf.NewPacket()
+	defer b.Release()
+	dst, err := pconn.ReadPacket(b)
+	if err != nil {
+		t.Fatalf("ReadPacket failed: %v", err)
+	}
+	if dst.Addr.String() != "8.8.8.8" || dst.Port != 53 {
+		t.Errorf("ReadPacket dst mismatch: %s", dst)
+	}
+	if !bytes.Equal(b.Bytes(), queryData) {
+		t.Errorf("payload mismatch: %s vs %s", string(b.Bytes()), string(queryData))
+	}
+
+	// Write response back using WritePacket
+	respData := []byte("PONG_UDP_RESPONSE")
+	respBuf := buf.As(respData)
+	if err := pconn.WritePacket(respBuf, dst); err != nil {
+		t.Fatalf("WritePacket failed: %v", err)
+	}
+
+	// Verify TUN output
+	select {
+	case out := <-outPkts:
+		if len(out) < 28 {
+			t.Fatalf("output packet too short: %d", len(out))
+		}
+		if out[9] != 17 {
+			t.Fatalf("expected UDP protocol (17), got %d", out[9])
+		}
+		srcP := binary.BigEndian.Uint16(out[20:22])
+		dstP := binary.BigEndian.Uint16(out[22:24])
+		if srcP != 53 || dstP != 40001 {
+			t.Fatalf("UDP ports mismatch: %d -> %d", srcP, dstP)
+		}
+		if !bytes.Equal(out[28:], respData) {
+			t.Fatalf("UDP response payload mismatch: %s", string(out[28:]))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for UDP output packet")
+	}
+
+	// Also verify WriteTo
+	secondResp := []byte("SECOND_UDP_REPLY")
+	n, err := pconn.WriteTo(secondResp, &net.UDPAddr{IP: targetIP, Port: int(targetPort)})
+	if err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+	if n != len(secondResp) {
+		t.Fatalf("WriteTo short write: %d vs %d", n, len(secondResp))
+	}
+
+	select {
+	case out := <-outPkts:
+		if !bytes.Equal(out[28:], secondResp) {
+			t.Fatalf("WriteTo payload mismatch: %s", string(out[28:]))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for second UDP output packet")
+	}
+
+	if err := pconn.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestEngine_UDP_Deadlines(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+	udpChan := make(chan *PacketConn, 1)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			outPkts <- packet
+		},
+		UDPHandler: func(conn *PacketConn) {
+			udpChan <- conn
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	targetIP := net.IPv4(8, 8, 8, 8)
+	pkt := buildIPv4UDP(clientIP, targetIP, 40002, 53, []byte("INIT"))
+	_ = engine.Input(pkt)
+
+	var pconn *PacketConn
+	select {
+	case pconn = <-udpChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for UDPHandler")
+	}
+	defer pconn.Close()
+
+	// Drain initial packet
+	bufData := make([]byte, 100)
+	_, _, err = pconn.ReadFrom(bufData)
+	if err != nil {
+		t.Fatalf("ReadFrom failed: %v", err)
+	}
+
+	// Set deadline in near future
+	if err := pconn.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline failed: %v", err)
+	}
+
+	_, _, err = pconn.ReadFrom(bufData)
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("expected ErrDeadlineExceeded, got: %v", err)
+	}
+}
+
+func TestEngine_UDP_MultipleSessions(t *testing.T) {
+	outPkts := make(chan []byte, 64)
+	udpChan := make(chan *PacketConn, 4)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+		UDPHandler: func(conn *PacketConn) {
+			udpChan <- conn
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.IPv4(10, 0, 0, 2)
+	target1 := net.IPv4(8, 8, 8, 8)
+	target2 := net.IPv4(1, 1, 1, 1)
+
+	// Client 1: 41001 -> 8.8.8.8:53
+	// Client 2: 41002 -> 1.1.1.1:53
+	_ = engine.Input(buildIPv4UDP(clientIP, target1, 41001, 53, []byte("C1-PING")))
+	_ = engine.Input(buildIPv4UDP(clientIP, target2, 41002, 53, []byte("C2-PING")))
+
+	conns := make(map[uint16]*PacketConn)
+	for i := 0; i < 2; i++ {
+		select {
+		case c := <-udpChan:
+			port := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+			conns[port] = c
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for 2 UDP connections")
+		}
+	}
+
+	c1 := conns[41001]
+	c2 := conns[41002]
+	if c1 == nil || c2 == nil {
+		t.Fatalf("failed to establish both UDP connections: %+v", conns)
+	}
+	defer c1.Close()
+	defer c2.Close()
+
+	// Reply to both
+	_, _ = c1.WriteTo([]byte("C1-PONG"), &net.UDPAddr{IP: target1, Port: 53})
+	_, _ = c2.WriteTo([]byte("C2-PONG"), &net.UDPAddr{IP: target2, Port: 53})
+
+	replies := make(map[uint16]string)
+	for i := 0; i < 2; i++ {
+		select {
+		case out := <-outPkts:
+			if len(out) >= 28 && out[9] == 17 {
+				dstPort := binary.BigEndian.Uint16(out[22:24])
+				replies[dstPort] = string(out[28:])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for 2 UDP replies")
+		}
+	}
+
+	if replies[41001] != "C1-PONG" || replies[41002] != "C2-PONG" {
+		t.Fatalf("unexpected UDP replies: %+v", replies)
+	}
+}
+
+func TestEngine_IPv6_TCP(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+	connChan := make(chan net.Conn, 1)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+		TCPHandler: func(conn net.Conn) {
+			connChan <- conn
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.ParseIP("fd00::2")
+	targetIP := net.ParseIP("2606:4700::6810:84e5")
+	clientPort := uint16(51234)
+	targetPort := uint16(80)
+
+	// Step 1: Send IPv6 TCP SYN
+	synPkt := buildIPv6TCP(clientIP, targetIP, clientPort, targetPort, 2000, 0, 0x02, nil)
+	if err := engine.Input(synPkt); err != nil {
+		t.Fatalf("Input SYN failed: %v", err)
+	}
+
+	var synAckSeq uint32
+	select {
+	case out := <-outPkts:
+		if len(out) < 60 {
+			t.Fatalf("expected at least 60 bytes for IPv6 TCP packet, got %d", len(out))
+		}
+		if (out[0] >> 4) != 6 {
+			t.Fatalf("expected IPv6 version, got %d", out[0]>>4)
+		}
+		if out[6] != 6 {
+			t.Fatalf("expected NextHeader TCP (6), got %d", out[6])
+		}
+		flags := out[40+13]
+		if (flags & 0x12) != 0x12 {
+			t.Fatalf("expected SYN|ACK flags (0x12), got 0x%02x", flags)
+		}
+		synAckSeq = binary.BigEndian.Uint32(out[40+4 : 40+8])
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for IPv6 TCP SYN/ACK")
+	}
+
+	// Step 2: Send IPv6 TCP ACK to complete handshake
+	ackPkt := buildIPv6TCP(clientIP, targetIP, clientPort, targetPort, 2001, synAckSeq+1, 0x10, nil)
+	if err := engine.Input(ackPkt); err != nil {
+		t.Fatalf("Input ACK failed: %v", err)
+	}
+
+	var conn net.Conn
+	select {
+	case conn = <-connChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for TCPHandler in IPv6")
+	}
+	defer conn.Close()
+
+	// Verify IPv6 addresses on Conn
+	if !conn.RemoteAddr().(*net.TCPAddr).IP.Equal(clientIP) {
+		t.Errorf("RemoteAddr mismatch: %s vs %s", conn.RemoteAddr(), clientIP)
+	}
+	if !conn.LocalAddr().(*net.TCPAddr).IP.Equal(targetIP) {
+		t.Errorf("LocalAddr mismatch: %s vs %s", conn.LocalAddr(), targetIP)
+	}
+
+	// Step 3: Write data from server to client over IPv6 TCP
+	go func() {
+		_, _ = conn.Write([]byte("PONG_IPV6_TCP"))
+	}()
+
+	select {
+	case out := <-outPkts:
+		if len(out) >= 60 && out[6] == 6 {
+			payload := out[60:]
+			if !bytes.Equal(payload, []byte("PONG_IPV6_TCP")) {
+				t.Fatalf("IPv6 TCP data mismatch: %s", string(payload))
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for IPv6 TCP data packet")
+	}
+}
+
+func TestEngine_IPv6_UDP(t *testing.T) {
+	outPkts := make(chan []byte, 32)
+	udpChan := make(chan *PacketConn, 1)
+
+	cfg := Config{
+		IPv4:    net.IPv4(10, 0, 0, 2),
+		Mask:    net.IPv4(255, 255, 255, 0),
+		Gateway: net.IPv4(10, 0, 0, 1),
+		OutputFn: func(packet []byte) {
+			p := make([]byte, len(packet))
+			copy(p, packet)
+			outPkts <- p
+		},
+		UDPHandler: func(conn *PacketConn) {
+			udpChan <- conn
+		},
+	}
+
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
+	defer engine.Close()
+
+	clientIP := net.ParseIP("fd00::2")
+	targetIP := net.ParseIP("2001:4860:4860::8888")
+	clientPort := uint16(52000)
+	targetPort := uint16(53)
+
+	queryData := []byte("PING_IPV6_UDP")
+	pkt := buildIPv6UDP(clientIP, targetIP, clientPort, targetPort, queryData)
+	if err := engine.Input(pkt); err != nil {
+		t.Fatalf("Input IPv6 UDP failed: %v", err)
+	}
+
+	var pconn *PacketConn
+	select {
+	case pconn = <-udpChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for IPv6 UDPHandler")
+	}
+	defer pconn.Close()
+
+	// Read packet
+	b := buf.NewPacket()
+	defer b.Release()
+	dst, err := pconn.ReadPacket(b)
+	if err != nil {
+		t.Fatalf("ReadPacket failed: %v", err)
+	}
+	if !bytes.Equal(b.Bytes(), queryData) {
+		t.Fatalf("payload mismatch: %s", string(b.Bytes()))
+	}
+	if !dst.Addr.Is6() {
+		t.Fatalf("expected IPv6 destination, got %v", dst)
+	}
+
+	// Write response back
+	respData := []byte("PONG_IPV6_UDP")
+	respBuf := buf.As(respData)
+	if err := pconn.WritePacket(respBuf, dst); err != nil {
+		t.Fatalf("WritePacket IPv6 failed: %v", err)
+	}
+
+	select {
+	case out := <-outPkts:
+		if len(out) < 48 {
+			t.Fatalf("output packet too short: %d", len(out))
+		}
+		if (out[0] >> 4) != 6 {
+			t.Fatalf("expected IPv6, got %d", out[0]>>4)
+		}
+		if out[6] != 17 {
+			t.Fatalf("expected UDP next header (17), got %d", out[6])
+		}
+		srcP := binary.BigEndian.Uint16(out[40:42])
+		dstP := binary.BigEndian.Uint16(out[42:44])
+		if srcP != 53 || dstP != 52000 {
+			t.Fatalf("UDP IPv6 ports mismatch: %d -> %d", srcP, dstP)
+		}
+		if !bytes.Equal(out[48:], respData) {
+			t.Fatalf("payload mismatch: %s", string(out[48:]))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for IPv6 UDP output packet")
 	}
 }
 

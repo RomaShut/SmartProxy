@@ -13,6 +13,7 @@ extern void goTcpAccept(uint64_t conn_id, int is_ipv6, const void *src_ip, uint1
 extern void goTcpRecv(uint64_t conn_id, const uint8_t *data, uint16_t len, uint64_t ctx_id);
 extern void goTcpSent(uint64_t conn_id, uint16_t len, uint64_t ctx_id);
 extern void goTcpErr(uint64_t conn_id, int err, uint64_t ctx_id);
+extern void goUdpRecv(uint64_t conn_id, int is_ipv6, const void *src_ip, uint16_t src_port, const void *dst_ip, uint16_t dst_port, const uint8_t *data, uint16_t len, uint64_t ctx_id);
 
 static inline void sp_lwip_bind_go_callbacks(struct sp_lwip *lw, uint64_t ctx_id) {
     sp_lwip_set_callbacks(
@@ -22,6 +23,7 @@ static inline void sp_lwip_bind_go_callbacks(struct sp_lwip *lw, uint64_t ctx_id
         goTcpRecv,
         goTcpSent,
         goTcpErr,
+        goUdpRecv,
         ctx_id
     );
 }

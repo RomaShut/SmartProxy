@@ -52,6 +52,43 @@ static void sp_remove_conn(struct sp_lwip *lw, struct sp_tcp_conn *conn) {
     }
 }
 
+struct sp_udp_conn {
+    struct sp_lwip *lw;
+    struct udp_pcb *pcb;
+    uint64_t id;
+    struct sp_udp_conn *next;
+};
+
+static struct sp_udp_conn *sp_find_udp_conn(struct sp_lwip *lw, uint64_t id) {
+    if (!lw || !id) return NULL;
+    uint32_t b = (uint32_t)(id % 256);
+    struct sp_udp_conn *c = lw->udp_conn_buckets[b];
+    while (c) {
+        if (c->id == id) return c;
+        c = c->next;
+    }
+    return NULL;
+}
+
+static void sp_add_udp_conn(struct sp_lwip *lw, struct sp_udp_conn *conn) {
+    uint32_t b = (uint32_t)(conn->id % 256);
+    conn->next = lw->udp_conn_buckets[b];
+    lw->udp_conn_buckets[b] = conn;
+}
+
+static void sp_remove_udp_conn(struct sp_lwip *lw, struct sp_udp_conn *conn) {
+    uint32_t b = (uint32_t)(conn->id % 256);
+    struct sp_udp_conn **curr = &lw->udp_conn_buckets[b];
+    while (*curr) {
+        if (*curr == conn) {
+            *curr = conn->next;
+            conn->next = NULL;
+            return;
+        }
+        curr = &(*curr)->next;
+    }
+}
+
 static err_t sp_output_pbuf(struct netif *n, struct pbuf *p) {
     struct sp_lwip *lw = n ? (struct sp_lwip *)n->state : NULL;
     if (!lw || !lw->packet_output) return ERR_IF;
@@ -176,6 +213,63 @@ static err_t sp_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     return ERR_OK;
 }
 
+static void sp_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    struct sp_udp_conn *conn = (struct sp_udp_conn *)arg;
+    (void)addr;
+    (void)port;
+    if (!conn || !conn->lw) {
+        if (p) pbuf_free(p);
+        return;
+    }
+    if (!p) return;
+
+    struct sp_lwip *lw = conn->lw;
+    if (!lw->udp_recv) {
+        pbuf_free(p);
+        return;
+    }
+
+    int is_ipv6 = IP_IS_V6(&pcb->local_ip) ? 1 : 0;
+    const void *src_ip = is_ipv6 ? (const void *)&pcb->remote_ip.u_addr.ip6.addr : (const void *)&pcb->remote_ip.u_addr.ip4.addr;
+    const void *dst_ip = is_ipv6 ? (const void *)&pcb->local_ip.u_addr.ip6.addr : (const void *)&pcb->local_ip.u_addr.ip4.addr;
+
+    if (p->next == NULL) {
+        lw->udp_recv(conn->id, is_ipv6, src_ip, pcb->remote_port, dst_ip, pcb->local_port, (const uint8_t *)p->payload, (uint16_t)p->tot_len, lw->ctx_id);
+    } else {
+        uint8_t *tmp = (uint8_t *)malloc(p->tot_len);
+        if (tmp) {
+            u16_t copied = pbuf_copy_partial(p, tmp, (u16_t)p->tot_len, 0);
+            if (copied == p->tot_len) {
+                lw->udp_recv(conn->id, is_ipv6, src_ip, pcb->remote_port, dst_ip, pcb->local_port, tmp, copied, lw->ctx_id);
+            }
+            free(tmp);
+        }
+    }
+    pbuf_free(p);
+}
+
+static void sp_udp_accept_cb(void *arg, struct udp_pcb *newpcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    struct sp_lwip *lw = (struct sp_lwip *)arg;
+    (void)p;
+    (void)addr;
+    (void)port;
+    if (!lw || !newpcb) return;
+
+    struct sp_udp_conn *conn = (struct sp_udp_conn *)calloc(1, sizeof(struct sp_udp_conn));
+    if (!conn) {
+        udp_remove(newpcb);
+        return;
+    }
+
+    conn->lw = lw;
+    conn->pcb = newpcb;
+    conn->id = ++lw->next_conn_id;
+    sp_add_udp_conn(lw, conn);
+
+    udp_bind_netif(newpcb, &lw->netif);
+    udp_recv(newpcb, sp_udp_recv_cb, conn);
+}
+
 void sp_set_ip4_addr(ip4_addr_t *a, uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
     if (!a) return;
     IP4_ADDR(a, b0, b1, b2, b3);
@@ -197,6 +291,18 @@ static void abort_all_netif_pcbs(struct netif *netif) {
     }
 }
 
+static void remove_all_netif_udp_pcbs(struct netif *netif) {
+    u8_t idx = netif_get_index(netif);
+    struct udp_pcb *pcb = udp_pcbs;
+    while (pcb != NULL) {
+        struct udp_pcb *next = pcb->next;
+        if (pcb->netif_idx == idx || pcb->pretend_netif_idx == idx) {
+            udp_remove(pcb);
+        }
+        pcb = next;
+    }
+}
+
 int sp_lwip_init(struct sp_lwip *lw, const ip4_addr_t *ip, const ip4_addr_t *mask, const ip4_addr_t *gw) {
     if (!lw) return -1;
     if (!g_lwip_initialized) {
@@ -205,15 +311,24 @@ int sp_lwip_init(struct sp_lwip *lw, const ip4_addr_t *ip, const ip4_addr_t *mas
     }
     memset(&lw->netif, 0, sizeof(lw->netif));
     memset(lw->conn_buckets, 0, sizeof(lw->conn_buckets));
+    memset(lw->udp_conn_buckets, 0, sizeof(lw->udp_conn_buckets));
     lw->next_conn_id = 0;
     lw->netif.state = lw;
 
     if (!netif_add(&lw->netif, ip, mask, gw, lw, sp_netif_init, ip_input)) return -2;
     netif_set_up(&lw->netif);
+    netif_set_link_up(&lw->netif);
     netif_set_default(&lw->netif);
 
     // Enable PRETEND flags for transparent proxying
     netif_set_flags(&lw->netif, NETIF_FLAG_PRETEND_TCP | NETIF_FLAG_PRETEND_UDP | NETIF_FLAG_PRETEND_ICMP);
+
+    // Set link-local IPv6 address (fe80::1)
+    ip_2_ip6(&lw->netif.ip6_addr[0])->addr[0] = PP_HTONL(0xfe800000ul);
+    ip_2_ip6(&lw->netif.ip6_addr[0])->addr[1] = 0;
+    ip_2_ip6(&lw->netif.ip6_addr[0])->addr[2] = 0;
+    ip_2_ip6(&lw->netif.ip6_addr[0])->addr[3] = PP_HTONL(0x00000001ul);
+    netif_ip6_addr_set_state(&lw->netif, 0, IP6_ADDR_VALID);
 
     // Wildcard TCP listener
     struct tcp_pcb *l = tcp_new_ip_type(IPADDR_TYPE_ANY);
@@ -232,6 +347,24 @@ int sp_lwip_init(struct sp_lwip *lw, const ip4_addr_t *ip, const ip4_addr_t *mas
     tcp_arg(lw->tcp_listener, lw);
     tcp_accept(lw->tcp_listener, sp_tcp_accept_cb);
 
+    // Wildcard UDP listener
+    struct udp_pcb *u = udp_new_ip_type(IPADDR_TYPE_ANY);
+    if (!u) {
+        tcp_close(lw->tcp_listener);
+        lw->tcp_listener = NULL;
+        return -6;
+    }
+    udp_bind_netif(u, &lw->netif);
+    err_t uerr = udp_bind(u, NULL, 0);
+    if (uerr != ERR_OK) {
+        udp_remove(u);
+        tcp_close(lw->tcp_listener);
+        lw->tcp_listener = NULL;
+        return -7;
+    }
+    udp_recv(u, sp_udp_accept_cb, lw);
+    lw->udp_listener = u;
+
     return 0;
 }
 
@@ -246,6 +379,7 @@ void sp_lwip_set_callbacks(
     sp_lwip_tcp_recv_fn tcp_recv,
     sp_lwip_tcp_sent_fn tcp_sent,
     sp_lwip_tcp_err_fn tcp_err,
+    sp_lwip_udp_recv_fn udp_recv,
     uint64_t ctx_id
 ) {
     if (!lw) return;
@@ -254,6 +388,7 @@ void sp_lwip_set_callbacks(
     lw->tcp_recv = tcp_recv;
     lw->tcp_sent = tcp_sent;
     lw->tcp_err = tcp_err;
+    lw->udp_recv = udp_recv;
     lw->ctx_id = ctx_id;
 }
 
@@ -280,7 +415,27 @@ void sp_lwip_free(struct sp_lwip *lw) {
         }
         lw->conn_buckets[i] = NULL;
     }
+
+    if (lw->udp_listener) {
+        udp_remove(lw->udp_listener);
+        lw->udp_listener = NULL;
+    }
+    for (int i = 0; i < 256; i++) {
+        struct sp_udp_conn *c = lw->udp_conn_buckets[i];
+        while (c) {
+            struct sp_udp_conn *next = c->next;
+            if (c->pcb) {
+                udp_remove(c->pcb);
+                c->pcb = NULL;
+            }
+            free(c);
+            c = next;
+        }
+        lw->udp_conn_buckets[i] = NULL;
+    }
+
     abort_all_netif_pcbs(&lw->netif);
+    remove_all_netif_udp_pcbs(&lw->netif);
     netif_remove(&lw->netif);
 }
 
@@ -387,4 +542,44 @@ int sp_lwip_tcp_sndbuf(struct sp_lwip *lw, uint64_t conn_id) {
     struct sp_tcp_conn *conn = sp_find_conn(lw, conn_id);
     if (!conn || !conn->pcb) return ERR_CONN;
     return (int)tcp_sndbuf(conn->pcb);
+}
+
+int sp_lwip_udp_send(struct sp_lwip *lw, uint64_t conn_id, int is_ipv6, const void *src_ip, uint16_t src_port, const void *data, uint32_t len) {
+    if (!lw || !src_ip || !data || !len || len > 0xFFFF) return ERR_ARG;
+    struct sp_udp_conn *conn = sp_find_udp_conn(lw, conn_id);
+    if (!conn || !conn->pcb) return ERR_CONN;
+
+    ip_addr_t from_addr;
+    memset(&from_addr, 0, sizeof(from_addr));
+    if (is_ipv6) {
+        memcpy(&from_addr.u_addr.ip6.addr, src_ip, 16);
+        from_addr.type = IPADDR_TYPE_V6;
+    } else {
+        memcpy(&from_addr.u_addr.ip4.addr, src_ip, 4);
+        from_addr.type = IPADDR_TYPE_V4;
+    }
+
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+    if (!p) return ERR_MEM;
+
+    memcpy(p->payload, data, len);
+    err_t err = udp_sendfrom(conn->pcb, p, &from_addr, src_port);
+    pbuf_free(p);
+
+    if (err != ERR_OK) return (int)err;
+    return (int)len;
+}
+
+int sp_lwip_udp_close(struct sp_lwip *lw, uint64_t conn_id) {
+    if (!lw) return ERR_ARG;
+    struct sp_udp_conn *conn = sp_find_udp_conn(lw, conn_id);
+    if (!conn) return ERR_CONN;
+
+    if (conn->pcb) {
+        udp_remove(conn->pcb);
+        conn->pcb = NULL;
+    }
+    sp_remove_udp_conn(lw, conn);
+    free(conn);
+    return 0;
 }

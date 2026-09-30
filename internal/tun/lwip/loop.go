@@ -10,6 +10,7 @@ package lwip
 */
 import "C"
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -29,6 +30,10 @@ type abortCmd struct {
 	connID uint64
 }
 
+type closeUDPCmd struct {
+	connID uint64
+}
+
 func (e *Engine) loop() {
 	defer e.wg.Done()
 	defer func() {
@@ -42,6 +47,14 @@ func (e *Engine) loop() {
 			C.sp_lwip_tcp_abort(e.lw, C.uint64_t(conn.id))
 		}
 		e.conns = nil
+
+		for _, uconn := range e.udpConns {
+			uconn.closed.Store(true)
+			uconn.closeOnce.Do(func() { close(uconn.closeChan) })
+			C.sp_lwip_udp_close(e.lw, C.uint64_t(uconn.id))
+		}
+		e.udpConns = nil
+
 		C.sp_lwip_destroy(e.lw)
 	}()
 
@@ -102,6 +115,10 @@ func (e *Engine) handleCmd(cmd any) {
 		e.handleClose(v.connID)
 	case *abortCmd:
 		e.handleAbort(v.connID)
+	case *udpSendReq:
+		e.handleUDPSend(v)
+	case *closeUDPCmd:
+		e.handleUDPClose(v.connID)
 	}
 }
 
@@ -241,4 +258,61 @@ func (e *Engine) onTCPErr(connID uint64, errCode int) {
 	}
 	conn.pendingWrites = nil
 	conn.onErr(err)
+}
+
+func (e *Engine) handleUDPSend(req *udpSendReq) {
+	if len(req.data) == 0 {
+		req.doneChan <- nil
+		return
+	}
+	isIPv6 := 0
+	var srcIPBytes []byte
+	if req.isIPv6 {
+		isIPv6 = 1
+		ip16 := req.srcIP.To16()
+		if ip16 == nil {
+			req.doneChan <- errors.New("invalid IPv6 address in UDP send")
+			return
+		}
+		srcIPBytes = ip16
+	} else {
+		ip4 := req.srcIP.To4()
+		if ip4 == nil {
+			req.doneChan <- errors.New("invalid IPv4 address in UDP send")
+			return
+		}
+		srcIPBytes = ip4
+	}
+
+	ret := C.sp_lwip_udp_send(
+		e.lw,
+		C.uint64_t(req.connID),
+		C.int(isIPv6),
+		unsafe.Pointer(&srcIPBytes[0]),
+		C.uint16_t(req.srcPort),
+		unsafe.Pointer(&req.data[0]),
+		C.uint32_t(len(req.data)),
+	)
+	if ret < 0 {
+		req.doneChan <- fmt.Errorf("lwip udp_send error: %d", int(ret))
+		return
+	}
+	req.doneChan <- nil
+}
+
+func (e *Engine) handleUDPClose(connID uint64) {
+	delete(e.udpConns, connID)
+	C.sp_lwip_udp_close(e.lw, C.uint64_t(connID))
+}
+
+func (e *Engine) onUDPRecv(connID uint64, isIPv6 bool, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, data []byte) {
+	conn := e.udpConns[connID]
+	if conn == nil {
+		conn = newPacketConn(e, connID, isIPv6, srcIP, srcPort, dstIP, dstPort)
+		e.udpConns[connID] = conn
+		if e.cfg.UDPHandler != nil {
+			go e.cfg.UDPHandler(conn)
+		}
+	}
+	conn.onData(dstIP, dstPort, data)
 }

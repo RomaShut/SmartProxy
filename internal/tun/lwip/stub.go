@@ -10,6 +10,9 @@ import (
 // ErrNotImplemented is returned when the lwIP backend was not included in this build.
 var ErrNotImplemented = errors.New("lwip backend is not included in this build, rebuild with -tags with_lwip")
 
+// PacketConn stub when built without with_lwip tag.
+type PacketConn struct{}
+
 // Config configures the lwIP Engine.
 type Config struct {
 	IPv4       net.IP
@@ -17,6 +20,7 @@ type Config struct {
 	Gateway    net.IP
 	OutputFn   func(packet []byte)
 	TCPHandler func(conn net.Conn)
+	UDPHandler func(conn *PacketConn)
 }
 
 // Engine stub when built without with_lwip tag.

@@ -84,3 +84,24 @@ func goTcpErr(connID C.uint64_t, err C.int, ctxID C.uint64_t) {
 
 	e.onTCPErr(uint64(connID), int(err))
 }
+
+//export goUdpRecv
+func goUdpRecv(connID C.uint64_t, isIPv6 C.int, srcIP unsafe.Pointer, srcPort C.uint16_t, dstIP unsafe.Pointer, dstPort C.uint16_t, data *C.uint8_t, length C.uint16_t, ctxID C.uint64_t) {
+	engineID := uint64(ctxID)
+	e := getEngine(engineID)
+	if e == nil || data == nil || length == 0 {
+		return
+	}
+
+	var sIP, dIP net.IP
+	if isIPv6 != 0 {
+		sIP = net.IP(C.GoBytes(srcIP, 16))
+		dIP = net.IP(C.GoBytes(dstIP, 16))
+	} else {
+		sIP = net.IP(C.GoBytes(srcIP, 4))
+		dIP = net.IP(C.GoBytes(dstIP, 4))
+	}
+
+	b := C.GoBytes(unsafe.Pointer(data), C.int(length))
+	e.onUDPRecv(uint64(connID), isIPv6 != 0, sIP, uint16(srcPort), dIP, uint16(dstPort), b)
+}
