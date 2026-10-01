@@ -43,6 +43,11 @@ jobs:
     executor: android
     steps:
       - checkout
+      - run:
+          name: Checkout git submodules
+          command: |
+            git submodule sync
+            git submodule update --init --recursive
 
       # 版本从 git tag 派生(M4,对齐 Makefile / app/build.gradle.kts):
       # 只认 v[0-9]* 发布 tag(排除 backup-*),无 tag 回退提交哈希。

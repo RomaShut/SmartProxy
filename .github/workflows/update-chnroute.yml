@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         # persist-credentials 默认 true:checkout 把远端设为 https 并把 GITHUB_TOKEN
