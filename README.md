@@ -54,29 +54,49 @@ SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限�
 
 ### 实测基准数据 (Benchmark)
 
-> **测试环境**：GitHub Actions CI Runner (ubuntu-latest, x86_64 4-Core)。  
-> **执行命令**：`go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/`  
+> **测试说明**：在两套典型硬件与运行时（GitHub Actions `ubuntu-latest` x86_64 4-Core 与 Android ARM64 8-Core 移动端真机）下执行标准压测命令：  
+> `CGO_ENABLED=1 go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/`  
 > *注：表中吞吐率为协议栈内存层面的封包/解包微基准测试上限，实际外网传输速度取决于物理网卡、上游节点带宽与网络延迟。*
 
 #### 1. UDP 吞吐量对比 (`BenchmarkStack_UDP_Throughput`, 1400 字节连续报文)
 
+**CI 云端测试环境 (ubuntu-latest, x86_64 4-Core)**
 | 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **77.4 ns** | **18,091.6 MB/s (18.1 GB/s)** | **0 B** | **0 allocs** |
-| **`system`** | 主机原生内核协议栈 | 需 Root | 118.0 ns | 11,863.6 MB/s (11.9 GB/s) | 15 B | 0 allocs |
-| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **137.8 ns** | **10,156.8 MB/s (10.2 GB/s)** | **135 B** | **0 allocs** |
-| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 3,415.0 ns | 410.0 MB/s | 551 B | 3 allocs |
-| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 11,586.0 ns | 120.8 MB/s | 4,948 B | 0 allocs |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **76.9 ns** | **18,204.5 MB/s (18.2 GB/s)** | **5 B** | **0 allocs** |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **100.3 ns** | **13,954.2 MB/s (14.0 GB/s)** | **3 B** | **0 allocs** |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 174.1 ns | 8,042.9 MB/s (8.0 GB/s) | 8 B | 0 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 3,534.0 ns | 396.1 MB/s | 558 B | 3 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 13,379.0 ns | 104.6 MB/s | 4,944 B | 0 allocs |
+
+**移动端真机测试环境 (Android ARM64 8-Core)**
+| 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **150.4 ns** | **9,307.4 MB/s (9.3 GB/s)** | **3 B** | **0 allocs** |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 295.5 ns | 4,737.4 MB/s (4.7 GB/s) | 16 B | 0 allocs |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 298.6 ns | 4,687.9 MB/s (4.7 GB/s) | 27 B | 1 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 2,908.0 ns | 481.5 MB/s | 655 B | 3 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 5,837.0 ns | 239.9 MB/s | 4,974 B | 0 allocs |
 
 #### 2. TCP 握手开销对比 (`BenchmarkStack_TCP_Handshake`, 三次握手建连)
 
+**CI 云端测试环境 (ubuntu-latest, x86_64 4-Core)**
 | 协议栈 | 架构分类 | 权限要求 | 握手耗时 (ns/op) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) | 适用场景分析 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`system`** | 主机内核原生协议栈 | 需 Root | **2,050 ns (~2.1 µs)** | **375 B** | **5 allocs** | 具备特权的服务器极速转发 |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 3,204 ns (~3.2 µs) | 375 B | 5 allocs | 具备特权的混合转发场景 |
-| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **39,659 ns (~39.7 µs)** | 2,043 B | 27 allocs | **通用默认**：网页浏览短连接并发快，无 CGO |
-| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 402,877 ns (~403 µs) | 722 B | 5 allocs | 开发测试参考 |
-| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,152 ns (~1.0 ms) | **574 B** | **7 allocs** | **移动端推荐**：低内存 Footprint，超高持续吞吐，零 GC 抖动 |
+| **`system`** | 主机内核原生协议栈 | 需 Root | **2,551 ns (~2.6 µs)** | **375 B** | **5 allocs** | 特权环境服务器极速转发 |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 3,071 ns (~3.1 µs) | 376 B | 5 allocs | 特权环境服务器 |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **29,705 ns (~29.7 µs)** | 2,045 B | 27 allocs | **通用默认**：网页浏览短连接并发快，无 CGO |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 410,256 ns (~410 µs) | 591 B | 5 allocs | 开发测试参考 |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,555 ns (~1.0 ms) | **574 B** | **7 allocs** | **移动端推荐**：单连接内存省 72%，GC 分配省 74% |
+
+**移动端真机测试环境 (Android ARM64 8-Core)**
+| 协议栈 | 架构分类 | 权限要求 | 握手耗时 (ns/op) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **2,075 ns (~2.1 µs)** | **376 B** | **5 allocs** |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 2,377 ns (~2.4 µs) | 376 B | 5 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **36,930 ns (~36.9 µs)** | 2,051 B | 27 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | ~400 µs | 720 B | 5 allocs |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,005,123 ns (~1.0 ms) | **574 B** | **7 allocs** |
 
 更深入的设计考量与优化细节见 [docs/performance.md](./docs/performance.md)。
 

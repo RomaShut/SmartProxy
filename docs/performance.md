@@ -64,48 +64,72 @@ func (h *Handler) isDNSCleanAndPrefer(ctx, wire, qname) (out []byte, preferCache
 
 ## §6 协议栈基准测试与对比（Benchmark）
 
-SmartProxy 支持 5 种 TUN 协议栈实现（`gvisor`、`lwip`、`system`、`mixed`、`go`）。为了解各协议栈在真实场景下的开销特征与性能边界，在相同基准测试套件（ubuntu-latest, x86_64 4-Core Runner）下执行了基准评测：
+SmartProxy 支持 5 种 TUN 协议栈实现（`gvisor`、`lwip`、`system`、`mixed`、`go`）。为了解各协议栈在真实场景下的开销特征与性能边界，在**两套典型硬件与运行时环境**下执行了标准化基准压测：
+1. **云端 CI 环境**：GitHub Actions Runner (`ubuntu-latest`, AMD/Intel x86_64 4-Core, Go 1.26+)
+2. **移动端真机环境**：Android 设备 (ARM64 / aarch64 8-Core, Termux, Go 1.27.1 + Clang CGO)
 
+测试执行命令：
 ```bash
-go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/
+# 协议栈吞吐与握手全套基准压测
+CGO_ENABLED=1 go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/
 ```
 
 ### 1. UDP 吞吐量对比 (`BenchmarkStack_UDP_Throughput`)
 
-> **测试场景**：单连接连续发送 1400 字节 UDP 报文，测定协议栈在内存中的分发吞吐、延迟与 Go 运行时堆分配开销。
+> **测试场景**：向协议栈连续灌入 1400 字节标准 UDP 报文，测算单包处理耗时 (ns/op)、内存处理吞吐率 (MB/s)、单包堆内存占用 (B/op) 与 Go 堆内存分配次数 (allocs/op)。
 
-| 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存分配 (B/op) | 分配次数 (allocs/op) |
+#### 环境 A：CI 云端测试环境 (Linux x86_64 4-Core)
+| 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **77.4 ns** | **18,091.6 MB/s (18.1 GB/s)** | **0 B** | **0 allocs** |
-| **`system`** | 主机原生内核协议栈 | 需 Root | 118.0 ns | 11,863.6 MB/s (11.9 GB/s) | 15 B | 0 allocs |
-| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **137.8 ns** | **10,156.8 MB/s (10.2 GB/s)** | **135 B** | **0 allocs** |
-| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 3,415.0 ns | 410.0 MB/s | 551 B | 3 allocs |
-| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 11,586.0 ns | 120.8 MB/s | 4,948 B | 0 allocs |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **76.9 ns** | **18,204.5 MB/s (18.2 GB/s)** | **5 B** | **0 allocs** |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **100.3 ns** | **13,954.2 MB/s (14.0 GB/s)** | **3 B** | **0 allocs** |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 174.1 ns | 8,042.9 MB/s (8.0 GB/s) | 8 B | 0 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 3,534.0 ns | 396.1 MB/s | 558 B | 3 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 13,379.0 ns | 104.6 MB/s | 4,944 B | 0 allocs |
+
+#### 环境 B：移动端真机测试环境 (Android ARM64 8-Core)
+| 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **150.4 ns** | **9,307.4 MB/s (9.3 GB/s)** | **3 B** | **0 allocs** |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 295.5 ns | 4,737.4 MB/s (4.7 GB/s) | 16 B | 0 allocs |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 298.6 ns | 4,687.9 MB/s (4.7 GB/s) | 27 B | 1 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 2,908.0 ns | 481.5 MB/s | 655 B | 3 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 5,837.0 ns | 239.9 MB/s | 4,974 B | 0 allocs |
 
 > **数据分析与客观说明**：
-> - **吞吐率定义**：表中吞吐率为协议栈内存层面的封包/解包基准上限，不代表实际广域网物理传输速度，实际下载/上传速率受网卡吞吐、上游带宽与网络 RTT 约束。
-> - **lwIP 的优势**：lwIP 展现出优异的 UDP 吞吐处理能力（~10.2 GB/s），且全程保持 **0 次 Go 堆内存分配（0 allocs/op）**，在高频 UDP 传输（如 DNS 密集查询、QUIC/HTTP3 流媒体、实时通信）中不会对 Go 垃圾回收器（GC）造成抖动压力。
-> - **gVisor 的特征**：gVisor 为全 Go 语言实现，包含较完整的网络子系统抽象层与对象分配，因此在纯 UDP 单流吞吐上开销较高，但其生态兼容度好，无需 CGO 编译器。
+> - **测试性质**：基准测试测定的是协议栈在内存层面的报文封包、解析与就地调度上限，不代表实际广域网物理传输速度，实际下载/上传带宽取决于物理网卡、蜂窝/Wi-Fi 射频、运营商限速与节点 RTT。
+> - **真机环境下 lwIP 的显著优势**：在 Android ARM64 真机上，lwIP 在**非 Root 兼容**栈中性能遥遥领先，单包处理耗时仅需 **150 ns**，吞吐达到 **9.3 GB/s**，相比 gVisor 吞吐提升近 **19 倍**。更重要的是保持 **0 次 Go 运行时堆分配（0 allocs/op）**，在高频 UDP 传输（DNS 密集解析、QUIC/HTTP3 音视频、游戏对战）中彻底消除了 Go 垃圾回收（GC）抖动对延迟的影响。
 
 ### 2. TCP 握手开销对比 (`BenchmarkStack_TCP_Handshake`)
 
 > **测试场景**：客户端向 TUN 注入 SYN 并完成 TCP 三次握手建立连接。
 
+#### 环境 A：CI 云端测试环境 (Linux x86_64 4-Core)
+| 协议栈 | 架构分类 | 权限要求 | 握手耗时 (ns/op) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) | 适用场景分析 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`system`** | 主机内核原生协议栈 | 需 Root | **2,551 ns (~2.6 µs)** | **375 B** | **5 allocs** | 特权环境服务器极速转发 |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 3,071 ns (~3.1 µs) | 376 B | 5 allocs | 特权环境服务器 |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **29,705 ns (~29.7 µs)** | 2,045 B | 27 allocs | **通用默认**：网页高频短连接并发建连迅速，纯 Go 无 CGO |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 410,256 ns (~410 µs) | 591 B | 5 allocs | 开发测试参考 |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,555 ns (~1.0 ms) | **574 B** | **7 allocs** | **移动端推荐**：单连接内存仅 574 B（省 72%），GC 分配减少 74% |
+
+#### 环境 B：移动端真机测试环境 (Android ARM64 8-Core)
 | 协议栈 | 架构分类 | 权限要求 | 握手耗时 (ns/op) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`system`** | 主机内核原生协议栈 | 需 Root | **2,050 ns (~2.1 µs)** | **375 B** | **5 allocs** |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 3,204 ns (~3.2 µs) | 375 B | 5 allocs |
-| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **39,659 ns (~39.7 µs)** | 2,043 B | 27 allocs |
-| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 402,877 ns (~403 µs) | 722 B | 5 allocs |
-| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,152 ns (~1.0 ms) | **574 B** | **7 allocs** |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **2,075 ns (~2.1 µs)** | **376 B** | **5 allocs** |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 2,377 ns (~2.4 µs) | 376 B | 5 allocs |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **36,930 ns (~36.9 µs)** | 2,051 B | 27 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | ~400 µs *(移动端快速复用偶发调度抖动)* | 720 B | 5 allocs |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,005,123 ns (~1.0 ms) | **574 B** | **7 allocs** |
 
 > **数据分析与客观说明**：
-> - **gVisor 适合高频短连接**：gVisor 采用并发协程驱动网络事件，单次 TCP 握手耗时约 40 µs，在网页浏览等伴随大量首屏并发短连接场景下响应迅捷。
-> - **lwIP 握手耗时成因与内存优势**：lwIP 源码面向单线程事件循环设计，Go CGO 适配层使用互斥锁配合定时器轮询步进（timer tick）推进状态机，因而握手阶段需经过数轮 tick 推进，单次握手耗时约为 1ms。但在连接建立之后，其单连接内存占用极小（仅 574 B，仅为 gVisor 的 ~28%），GC 压力大幅降低（7 allocs vs 27 allocs）。
+> - **gVisor 短连接建连优势**：gVisor 基于多协程高并发驱动，单次 TCP 握手耗时约 30–37 µs，在网页浏览等伴随大量首屏并发短连接场景下响应迅速。
+> - **lwIP 握手调度机制与内存优势**：lwIP 源码面向单线程事件循环设计，Go CGO 适配层使用互斥锁配合定时器轮询步进（timer tick）推进状态机，因而握手阶段需经过数轮 tick 推进，单次握手耗时约 1 ms。但在连接建立之后，其单连接内存占用极小（仅 574 B，仅为 gVisor 的 ~28%），GC 压力大幅降低（7 次分配 vs 27 次分配）。
 > - **协议栈选型建议**：
->   - **默认推荐 `gvisor`**：全 Go 实现，零 CGO 编译依赖，跨平台成熟稳定，短连接响应快，适合全平台通用默认。
+>   - **默认推荐 `gvisor`**：全 Go 实现，零 CGO 编译依赖，跨平台成熟稳定，短连接响应快，全平台通用首选。
 >   - **移动端推荐 `lwip`**：极低内存 Footprint、极低 GC 压力、超高 UDP 吞吐，非常契合 Android 客户端长期后台驻留，有效避免系统低内存清理（LMK 杀进程）。
 >   - **特权环境可选 `system` / `mixed`**：在 Linux 服务器等具备 root / `CAP_NET_ADMIN` 权限且需要极致吞吐的环境下可选用。
+
 
 ## §7 检查清单（优化后验证）
 
