@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.IpPrefix
 import android.net.LinkAddress
+import android.net.LinkProperties
 import android.net.MacAddress
 import android.net.Network
 import android.net.wifi.SoftApConfiguration

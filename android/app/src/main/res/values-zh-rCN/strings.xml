@@ -11,6 +11,7 @@
     <!-- Common -->
     <string name="btn_save">保存</string>
     <string name="btn_cancel">取消</string>
+    <string name="btn_confirm">确定</string>
     <string name="cd_back">返回</string>
 
     <!-- Service mode labels -->

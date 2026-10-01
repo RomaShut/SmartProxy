@@ -11,6 +11,7 @@
     <!-- Common -->
     <string name="btn_save">Save</string>
     <string name="btn_cancel">Cancel</string>
+    <string name="btn_confirm">Confirm</string>
     <string name="cd_back">Back</string>
 
     <!-- Service mode labels -->
