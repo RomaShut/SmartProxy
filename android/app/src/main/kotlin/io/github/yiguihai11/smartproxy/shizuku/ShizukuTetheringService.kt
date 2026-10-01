@@ -8,7 +8,6 @@ import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.MacAddress
 import android.net.Network
-import android.net.wifi.SoftApConfiguration
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -767,8 +766,11 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
     override fun getBlockedClientList(): Array<String> {
         val wm = wifiManager ?: return emptyArray()
         return runCatching {
-            val config = wm.softApConfiguration ?: return@runCatching emptyArray<String>()
-            config.blockedClientList.map { it.toString().lowercase() }.toTypedArray()
+            val getSoftApConfigMethod = wm.javaClass.getMethod("getSoftApConfiguration")
+            val config = getSoftApConfigMethod.invoke(wm) ?: return@runCatching emptyArray<String>()
+            val getBlockedListMethod = config.javaClass.getMethod("getBlockedClientList")
+            val list = getBlockedListMethod.invoke(config) as? List<*> ?: return@runCatching emptyArray<String>()
+            list.mapNotNull { it?.toString()?.lowercase() }.toTypedArray()
         }.getOrDefault(emptyArray())
     }
 
@@ -777,17 +779,25 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         val cleanMac = mac.trim().lowercase()
         return runCatching {
             val targetMac = MacAddress.fromString(cleanMac)
-            val currentConfig = wm.softApConfiguration ?: return@runCatching false
-            val currentList = currentConfig.blockedClientList
+            val getSoftApConfigMethod = wm.javaClass.getMethod("getSoftApConfiguration")
+            val config = getSoftApConfigMethod.invoke(wm) ?: return@runCatching false
+
+            val getBlockedListMethod = config.javaClass.getMethod("getBlockedClientList")
+            val currentList = (getBlockedListMethod.invoke(config) as? List<*>)?.filterIsInstance<MacAddress>() ?: emptyList()
             if (currentList.contains(targetMac)) return@runCatching true
 
             val updatedList = currentList + targetMac
-            val newConfig = SoftApConfiguration.Builder(currentConfig)
-                .setClientControlByUserEnabled(true)
-                .setBlockedClientList(updatedList)
-                .build()
-            wm.setSoftApConfiguration(newConfig)
-        }.getOrDefault(false)
+
+            val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
+            val builder = builderClass.getConstructor(config.javaClass).newInstance(config)
+            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, true)
+            builderClass.getMethod("setBlockedClientList", java.util.List::class.java).invoke(builder, updatedList)
+            val newConfig = builderClass.getMethod("build").invoke(builder)
+
+            val setSoftApConfigMethod = wm.javaClass.getMethod("setSoftApConfiguration", config.javaClass)
+            val res = setSoftApConfigMethod.invoke(wm, newConfig)
+            (res as? Boolean) ?: true
+        }.onFailure { Log.e(TAG, "blockClient failed for $mac", it) }.getOrDefault(false)
     }
 
     override fun unblockClient(mac: String): Boolean {
@@ -795,17 +805,25 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         val cleanMac = mac.trim().lowercase()
         return runCatching {
             val targetMac = MacAddress.fromString(cleanMac)
-            val currentConfig = wm.softApConfiguration ?: return@runCatching false
-            val currentList = currentConfig.blockedClientList
+            val getSoftApConfigMethod = wm.javaClass.getMethod("getSoftApConfiguration")
+            val config = getSoftApConfigMethod.invoke(wm) ?: return@runCatching false
+
+            val getBlockedListMethod = config.javaClass.getMethod("getBlockedClientList")
+            val currentList = (getBlockedListMethod.invoke(config) as? List<*>)?.filterIsInstance<MacAddress>() ?: emptyList()
             if (!currentList.contains(targetMac)) return@runCatching true
 
             val updatedList = currentList.filter { it != targetMac }
-            val newConfig = SoftApConfiguration.Builder(currentConfig)
-                .setClientControlByUserEnabled(true)
-                .setBlockedClientList(updatedList)
-                .build()
-            wm.setSoftApConfiguration(newConfig)
-        }.getOrDefault(false)
+
+            val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
+            val builder = builderClass.getConstructor(config.javaClass).newInstance(config)
+            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, true)
+            builderClass.getMethod("setBlockedClientList", java.util.List::class.java).invoke(builder, updatedList)
+            val newConfig = builderClass.getMethod("build").invoke(builder)
+
+            val setSoftApConfigMethod = wm.javaClass.getMethod("setSoftApConfiguration", config.javaClass)
+            val res = setSoftApConfigMethod.invoke(wm, newConfig)
+            (res as? Boolean) ?: true
+        }.onFailure { Log.e(TAG, "unblockClient failed for $mac", it) }.getOrDefault(false)
     }
 
     override fun destroy() {
