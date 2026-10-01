@@ -37,6 +37,7 @@ const (
 type connRecord struct {
 	proto    int32 // 6=TCP, 17=UDP
 	uid      int32
+	srcIP    string // 客户端源 IP(热点外接设备 IP 反查)
 	ip       string // 目标 IP(所有连接都有)
 	port     int
 	host     atomic.Pointer[string] // smart TCP 的域名;空则快照显示 ip
@@ -107,11 +108,11 @@ func (cs *ConnStats) SetEnabled(on bool) {
 }
 
 // begin 登记一条新连接并返回其记录;监控关闭时返回 nil(数据路径零开销)。
-func (cs *ConnStats) begin(uid, proto int32, ip string, port int) *connRecord {
+func (cs *ConnStats) begin(uid, proto int32, srcIP, ip string, port int) *connRecord {
 	if !cs.enabled.Load() {
 		return nil
 	}
-	rec := &connRecord{proto: proto, uid: uid, ip: ip, port: port}
+	rec := &connRecord{proto: proto, uid: uid, srcIP: srcIP, ip: ip, port: port}
 	rec.lastSeen.Store(time.Now().Unix())
 
 	cs.mu.Lock()
@@ -193,7 +194,7 @@ func (cs *ConnStats) Snapshot() string {
 			app.Up += r.up.Load()
 			app.Down += r.down.Load()
 			app.Conns = append(app.Conns, connStatsJSONRec{
-				Proto: r.proto, Host: host, Port: r.port, Up: r.up.Load(), Down: r.down.Load(),
+				Proto: r.proto, SrcIP: r.srcIP, Host: host, Port: r.port, Up: r.up.Load(), Down: r.down.Load(),
 			})
 		}
 		us.mu.Unlock()
@@ -374,9 +375,10 @@ type appStatsJSON struct {
 }
 
 type connStatsJSONRec struct {
-	Proto int32  `json:"proto"` // 6=TCP, 17=UDP
-	Host  string `json:"host"`  // 域名(smart TCP)或目标 IP
+	Proto int32  `json:"proto"`            // 6=TCP, 17=UDP
+	SrcIP string `json:"src_ip,omitempty"` // 客户端源 IP(热点外接设备识别用)
+	Host  string `json:"host"`             // 域名(smart TCP)或目标 IP
 	Port  int    `json:"port"`
-	Up    int64  `json:"up"`   // 该连接累计上行
-	Down  int64  `json:"down"` // 该连接累计下行
+	Up    int64  `json:"up"`               // 该连接累计上行
+	Down  int64  `json:"down"`             // 该连接累计下行
 }

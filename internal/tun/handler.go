@@ -292,7 +292,7 @@ func (h *TUNHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source 
 	var rec *connRecord
 	if h.connStats.Enabled() {
 		uid := h.resolveUID(6, source, destination)
-		rec = h.connStats.begin(uid, 6, host, port)
+		rec = h.connStats.begin(uid, 6, source.Addr.String(), host, port)
 		if rec != nil {
 			conn = h.connStats.wrapTCP(conn, rec)
 		}
@@ -480,7 +480,7 @@ func (h *TUNHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketCon
 	// 连接监控(同 TCP):UDP 一律不解析域名(设计定稿),host 落目标 IP。
 	if h.connStats.Enabled() {
 		uid := h.resolveUID(17, source, destination)
-		rec := h.connStats.begin(uid, 17, host, port)
+		rec := h.connStats.begin(uid, 17, source.Addr.String(), host, port)
 		if rec != nil {
 			conn = h.connStats.wrapUDP(conn, rec)
 		}

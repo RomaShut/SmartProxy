@@ -22,6 +22,7 @@ class TetheringUpstreamMonitorTest {
         assertEquals(listOf(usb), monitor.awaitInterfaces(0))
         interfaces.set(emptyList())
         assertTrue(monitor.awaitInterfaces(0).isEmpty())
+        assertTrue(monitor.currentClients.isEmpty())
 
         interfaces.set(null)
         assertThrows(IllegalStateException::class.java) { monitor.awaitInterfaces(0) }

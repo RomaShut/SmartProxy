@@ -1,12 +1,19 @@
 package io.github.yiguihai11.smartproxy
 
+import android.content.ComponentName
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.IBinder
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import io.github.yiguihai11.smartproxy.shizuku.IShizukuTetheringService
+import io.github.yiguihai11.smartproxy.shizuku.ShizukuTetheringService
+import rikka.shizuku.Shizuku
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
@@ -89,8 +96,14 @@ import org.json.JSONObject
  *  - UID→包名/图标:懒解析 + 缓存(复用 AppEnumerator 图标缓存),只解快照里出现的 app。
  */
 
-/** 轮询快照的数据模型(字段与 internal/tun/stats.go 快照 JSON 对齐)。 */
-private data class ConnStatsRec(val proto: Int, val host: String, val port: Int, val up: Long, val down: Long)
+private data class ConnStatsRec(
+    val proto: Int,
+    val host: String,
+    val port: Int,
+    val up: Long,
+    val down: Long,
+    val srcIp: String = "",
+)
 private data class AppStats(val uid: Int, val up: Long, val down: Long, val conns: List<ConnStatsRec>)
 private data class AppItem(
     val uid: Int,
@@ -138,6 +151,34 @@ class NetworkStatusActivity : ComponentActivity() {
      *  页面走/留只动自己那一份,不能把悬浮窗在用的采集关掉。 */
     private var gateHeld = false
 
+    private var tetheringService: IShizukuTetheringService? = null
+    private val tetheringConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            tetheringService = IShizukuTetheringService.Stub.asInterface(binder)
+        }
+        override fun onServiceDisconnected(name: ComponentName) {
+            tetheringService = null
+        }
+    }
+
+    private fun bindTetheringIfNeeded() {
+        if (tetheringService != null) return
+        if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            runCatching {
+                Shizuku.bindUserService(ShizukuTetheringService.createUserServiceArgs(), tetheringConnection)
+            }
+        }
+    }
+
+    private fun unbindTethering() {
+        if (tetheringService != null) {
+            runCatching {
+                Shizuku.unbindUserService(ShizukuTetheringService.createUserServiceArgs(), tetheringConnection, true)
+            }
+            tetheringService = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 数据全靠 VPN 引擎的连接采集,服务没跑时这页就是空壳。桌面长按快捷方式可能直跳进来,
@@ -158,8 +199,11 @@ class NetworkStatusActivity : ComponentActivity() {
                     val poll: suspend () -> Unit = {
                         val parsed = withContext(Dispatchers.IO) {
                             runCatching {
-                                val json = smartproxy.mobile.Mobile.getConnectionStats()
-                                buildItems(parseConnStats(json))
+                                val localJson = smartproxy.mobile.Mobile.getConnectionStats()
+                                val tetheringJson = tetheringService?.let { svc ->
+                                    runCatching { svc.tetheringConnectionStats }.getOrNull()
+                                }
+                                buildItems(parseCombinedConnStats(localJson, tetheringJson))
                             }.getOrNull()
                         }
                         if (parsed == null) {
@@ -244,6 +288,7 @@ class NetworkStatusActivity : ComponentActivity() {
             ConnStatsGate.acquire()
             gateHeld = true
         }
+        bindTetheringIfNeeded()
         // 后台延迟关采集可能已把引擎 pin 复位(-1):回来按当前展开状态重新 pin,
         // 防正在查看的应用因 pin 失同步而无流量淡出(-1 时是 no-op)。
         runCatching { smartproxy.mobile.Mobile.setConnStatsPin(pinnedUid) }
@@ -272,6 +317,7 @@ class NetworkStatusActivity : ComponentActivity() {
     override fun onDestroy() {
         statsCloseJob?.cancel() // 取消未触发的延迟任务,防销毁后仍碰 Mobile
         statsCloseJob = null
+        unbindTethering()
         // 兜底(正常 onPause 已延迟释放 / 宽限内销毁):放掉自己那份采集,确保销毁后引擎零开销。
         if (gateHeld) {
             ConnStatsGate.release()
@@ -296,7 +342,8 @@ class NetworkStatusActivity : ComponentActivity() {
                     host = c.getString("host"),
                     port = c.getInt("port"),
                     up = c.getLong("up"),
-                    down = c.getLong("down")
+                    down = c.getLong("down"),
+                    srcIp = c.optString("src_ip", "")
                 )
             }
             out += AppStats(
@@ -306,6 +353,82 @@ class NetworkStatusActivity : ComponentActivity() {
                 conns = conns
             )
         }
+        return out
+    }
+
+    /** 解析并聚合本机与热点两份快照 JSON → List<AppStats>。 */
+    private fun parseCombinedConnStats(localJson: String, tetheringJson: String?): List<AppStats> {
+        val out = ArrayList<AppStats>()
+        out.addAll(parseConnStats(localJson))
+
+        if (tetheringJson.isNullOrBlank() || tetheringJson == "{\"apps\":[]}") {
+            return out
+        }
+
+        runCatching {
+            val root = JSONObject(tetheringJson)
+            val clientsArr = root.optJSONArray("clients") ?: JSONArray()
+            val clientByIp = HashMap<String, JSONObject>()
+            for (i in 0 until clientsArr.length()) {
+                val c = clientsArr.getJSONObject(i)
+                val ip = c.optString("ip", "")
+                if (ip.isNotEmpty()) clientByIp[ip] = c
+            }
+
+            val appsArr = root.optJSONArray("apps") ?: JSONArray()
+            val connsBySrcIp = HashMap<String, ArrayList<ConnStatsRec>>()
+
+            for (i in 0 until appsArr.length()) {
+                val a = appsArr.getJSONObject(i)
+                val connsArr = a.optJSONArray("conns") ?: JSONArray()
+                for (j in 0 until connsArr.length()) {
+                    val c = connsArr.getJSONObject(j)
+                    val srcIp = c.optString("src_ip", "")
+                    val rec = ConnStatsRec(
+                        proto = c.getInt("proto"),
+                        host = c.getString("host"),
+                        port = c.getInt("port"),
+                        up = c.getLong("up"),
+                        down = c.getLong("down"),
+                        srcIp = srcIp,
+                    )
+                    connsBySrcIp.getOrPut(srcIp) { ArrayList() }.add(rec)
+                }
+            }
+
+            val allIps = (clientByIp.keys + connsBySrcIp.keys).filter { it.isNotBlank() }.toSet()
+            for (ip in allIps) {
+                val clientObj = clientByIp[ip]
+                val mac = clientObj?.optString("mac", "").orEmpty()
+                val hostname = clientObj?.optString("hostname", "").orEmpty()
+
+                val conns = connsBySrcIp[ip] ?: emptyList()
+                val up = conns.sumOf { it.up }
+                val down = conns.sumOf { it.down }
+
+                val synthUid = -1000 - (Math.abs(ip.hashCode()) % 10000)
+
+                val label = buildString {
+                    append("📱 ")
+                    if (hostname.isNotBlank()) {
+                        append(hostname)
+                        append(" (").append(ip).append(")")
+                    } else {
+                        append(ip)
+                    }
+                }
+                val pkgDesc = if (mac.isNotBlank()) "MAC: $mac" else "热点外接设备"
+                metaCache[synthUid] = AppMeta(label, null, pkgDesc)
+
+                out += AppStats(
+                    uid = synthUid,
+                    up = up,
+                    down = down,
+                    conns = conns
+                )
+            }
+        }.onFailure { Log.w(TAG, "[NetworkStatus] failed to parse tethering stats", it) }
+
         return out
     }
 
@@ -340,7 +463,7 @@ class NetworkStatusActivity : ComponentActivity() {
 
     /** 长按应用行 → 打开其系统「应用信息」页(ACTION_APPLICATION_DETAILS)。 */
     private fun openAppInfo(pkg: String?) {
-        if (pkg == null) return
+        if (pkg == null || pkg.startsWith("MAC:") || pkg == "热点外接设备") return
         runCatching {
             startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", pkg, null))

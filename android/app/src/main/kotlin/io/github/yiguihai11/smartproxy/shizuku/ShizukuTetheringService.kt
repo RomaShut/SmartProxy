@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.Keep
 import io.github.yiguihai11.smartproxy.BuildConfig
+import org.json.JSONArray
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import rikka.shizuku.SystemServiceHelper
@@ -677,6 +678,54 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         }
     }
 
+    override fun getTetheredClients(): String {
+        val monitor = upstreamMonitor
+        val systemClients = monitor?.currentClients.orEmpty()
+        val arpClients = readArpClients()
+        val clients = mergeTetheredClients(systemClients, arpClients)
+        val arr = JSONArray()
+        for (client in clients) {
+            val obj = JSONObject()
+            obj.put("mac", client.mac)
+            obj.put("ip", client.ip)
+            obj.put("hostname", client.hostname ?: "")
+            obj.put("type", client.tetheringType)
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
+    override fun getTetheringConnectionStats(): String {
+        val monitor = upstreamMonitor
+        val systemClients = monitor?.currentClients.orEmpty()
+        val arpClients = readArpClients()
+        val clients = mergeTetheredClients(systemClients, arpClients)
+
+        val clientsArr = JSONArray()
+        for (client in clients) {
+            val obj = JSONObject()
+            obj.put("mac", client.mac)
+            obj.put("ip", client.ip)
+            obj.put("hostname", client.hostname ?: "")
+            obj.put("type", client.tetheringType)
+            clientsArr.put(obj)
+        }
+
+        val rawStats = if (routingActive && smartproxy.mobile.Mobile.isRunning()) {
+            runCatching {
+                smartproxy.mobile.Mobile.getConnectionStats()
+            }.getOrDefault("{\"apps\":[]}")
+        } else {
+            "{\"apps\":[]}"
+        }
+
+        return runCatching {
+            val statsObj = JSONObject(rawStats)
+            statsObj.put("clients", clientsArr)
+            statsObj.toString()
+        }.getOrDefault(rawStats)
+    }
+
     override fun destroy() {
         val safeToExit = runRoutingWork { shutdownRoutingLocked() == RESULT_OK }
         if (!safeToExit) {
@@ -1051,6 +1100,7 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         try {
             smartproxy.mobile.Mobile.startRouter(configFile.absolutePath, goFd.toLong(), true)
             check(smartproxy.mobile.Mobile.isRunning()) { "SmartProxy tethering core did not start" }
+            runCatching { smartproxy.mobile.Mobile.setConnStatsEnabled(true) }
         } catch (error: Throwable) {
             stopRoutingEngineLocked()
             throw error
@@ -1143,6 +1193,7 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
 
     private fun stopRoutingEngineLocked() {
         stopEngineHealthCheck()
+        runCatching { smartproxy.mobile.Mobile.setConnStatsEnabled(false) }
         runCatching { smartproxy.mobile.Mobile.stopRouter() }
             .onFailure { Log.w(TAG, "Unable to stop tethering router", it) }
     }

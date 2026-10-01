@@ -32,12 +32,14 @@ internal object TetheringApi36 {
         val interfaceNames = AtomicReference<String?>(null)
         val interfaces = AtomicReference<List<ActiveTetheringInterface>?>(null)
         val interfacesReceived = CountDownLatch(1)
+        val clients = AtomicReference<List<TetheredClientInfo>>(emptyList())
         val changeExecutor = newTetheringChangeExecutor()
         val callback = UpstreamCallback(
             connectivityManager,
             interfaceNames,
             interfaces,
             interfacesReceived,
+            clients,
             changeExecutor,
             onChanged,
         )
@@ -47,7 +49,7 @@ internal object TetheringApi36 {
             changeExecutor.shutdownNow()
             throw error
         }
-        return TetheringUpstreamMonitor(interfaceNames, interfaces, interfacesReceived) {
+        return TetheringUpstreamMonitor(interfaceNames, interfaces, interfacesReceived, clients) {
             runCatching { manager.unregisterTetheringEventCallback(callback) }
             changeExecutor.shutdownNow()
         }
@@ -156,6 +158,7 @@ internal object TetheringApi36 {
         private val interfaceNames: AtomicReference<String?>,
         private val tetheredInterfaces: AtomicReference<List<ActiveTetheringInterface>?>,
         private val interfacesReceived: CountDownLatch,
+        private val clients: AtomicReference<List<TetheredClientInfo>>,
         private val changeExecutor: ExecutorService,
         private val onChanged: () -> Unit,
     ) : TetheringManager.TetheringEventCallback {
@@ -170,6 +173,18 @@ internal object TetheringApi36 {
         fun onUpstreamChanged(network: Network?) {
             interfaceNames.set(upstreamInterfaceNames(connectivityManager, network))
             notifyChanged()
+        }
+
+        @Keep
+        @Suppress("unused")
+        fun onClientsChanged(clientsList: Collection<*>) {
+            clients.set(extractTetheredClients(clientsList))
+        }
+
+        @Keep
+        @Suppress("unused")
+        fun onTetheredClientsChanged(clientsList: Collection<*>) {
+            clients.set(extractTetheredClients(clientsList))
         }
 
         private fun notifyChanged() {

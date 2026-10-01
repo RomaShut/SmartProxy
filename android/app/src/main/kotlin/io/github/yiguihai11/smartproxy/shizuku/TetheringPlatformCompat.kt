@@ -8,7 +8,9 @@ import android.net.NetworkRequest
 import android.net.TetheringManager
 import android.os.Build
 import androidx.annotation.ChecksSdkIntAtLeast
+import java.io.File
 import java.lang.reflect.Proxy
+import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
@@ -41,6 +43,7 @@ internal object TetheringPlatformCompat {
         val interfaceNames = AtomicReference<String?>(null)
         val interfaces = AtomicReference<List<ActiveTetheringInterface>?>(null)
         val interfacesReceived = CountDownLatch(1)
+        val clients = AtomicReference<List<TetheredClientInfo>>(emptyList())
         val changeExecutor = newTetheringChangeExecutor()
         val callback = Proxy.newProxyInstance(
             TetheringPlatformCompat::class.java.classLoader,
@@ -68,6 +71,15 @@ internal object TetheringPlatformCompat {
                     runCatching { changeExecutor.execute(onChanged) }
                     null
                 }
+                "onClientsChanged", "onTetheredClientsChanged" -> {
+                    runCatching {
+                        val collection = arguments?.firstOrNull() as? Collection<*>
+                        if (collection != null) {
+                            clients.set(extractTetheredClients(collection))
+                        }
+                    }
+                    null
+                }
                 "equals" -> proxy === arguments?.firstOrNull()
                 "hashCode" -> System.identityHashCode(proxy)
                 "toString" -> "SmartProxy tethering upstream callback"
@@ -88,7 +100,7 @@ internal object TetheringPlatformCompat {
             changeExecutor.shutdownNow()
             throw error
         }
-        return TetheringUpstreamMonitor(interfaceNames, interfaces, interfacesReceived) {
+        return TetheringUpstreamMonitor(interfaceNames, interfaces, interfacesReceived, clients) {
             runCatching { unregister.invoke(service, callback) }
             changeExecutor.shutdownNow()
         }
@@ -189,10 +201,12 @@ internal class TetheringUpstreamMonitor(
     private val interfaceNames: AtomicReference<String?>,
     private val interfaces: AtomicReference<List<ActiveTetheringInterface>?>,
     private val interfacesReceived: CountDownLatch,
+    private val clients: AtomicReference<List<TetheredClientInfo>> = AtomicReference(emptyList()),
     private val closeAction: () -> Unit,
 ) : AutoCloseable {
     val currentInterfaceNames: String? get() = interfaceNames.get()
     val currentInterfaces: List<ActiveTetheringInterface>? get() = interfaces.get()
+    val currentClients: List<TetheredClientInfo> get() = clients.get()
     fun awaitInterfaces(timeoutSeconds: Long): List<ActiveTetheringInterface> {
         check(interfacesReceived.await(timeoutSeconds, TimeUnit.SECONDS)) { "Timed out reading tethered interfaces" }
         return checkNotNull(currentInterfaces) { "Unable to identify active tethering interfaces" }
@@ -212,3 +226,84 @@ internal fun newTetheringChangeExecutor(): ExecutorService = Executors.newSingle
 }
 internal data class ActiveTetheringInterface(val type: Int, val name: String)
 internal fun tetheringTypeBit(type: Int): Int = if (type in 0..30) 1 shl type else 0
+
+internal data class TetheredClientInfo(
+    val mac: String,
+    val ip: String,
+    val hostname: String?,
+    val tetheringType: Int,
+)
+
+internal fun extractTetheredClients(collection: Collection<*>): List<TetheredClientInfo> {
+    val results = mutableListOf<TetheredClientInfo>()
+    for (client in collection) {
+        if (client == null) continue
+        val clientClass = client.javaClass
+        val mac = runCatching {
+            clientClass.methods.firstOrNull { it.name == "getMacAddress" }?.invoke(client)?.toString()
+        }.getOrNull().orEmpty()
+        val type = runCatching {
+            clientClass.methods.firstOrNull { it.name == "getTetheringType" }?.invoke(client) as? Int
+        }.getOrNull() ?: -1
+
+        val addresses = runCatching {
+            clientClass.methods.firstOrNull { it.name == "getAddresses" }?.invoke(client) as? Collection<*>
+        }.getOrNull()
+
+        if (!addresses.isNullOrEmpty()) {
+            for (addrInfo in addresses) {
+                if (addrInfo == null) continue
+                val addrClass = addrInfo.javaClass
+                val linkAddress = runCatching {
+                    addrClass.methods.firstOrNull { it.name == "getAddress" }?.invoke(addrInfo)
+                }.getOrNull()
+                val ip = runCatching {
+                    (linkAddress?.javaClass?.methods?.firstOrNull { it.name == "getAddress" }?.invoke(linkAddress) as? InetAddress)?.hostAddress
+                }.getOrNull().orEmpty()
+                val hostname = runCatching {
+                    addrClass.methods.firstOrNull { it.name == "getHostname" }?.invoke(addrInfo) as? String
+                }.getOrNull()
+
+                if (mac.isNotEmpty() || ip.isNotEmpty()) {
+                    results.add(TetheredClientInfo(mac = mac, ip = ip, hostname = hostname, tetheringType = type))
+                }
+            }
+        } else if (mac.isNotEmpty()) {
+            results.add(TetheredClientInfo(mac = mac, ip = "", hostname = null, tetheringType = type))
+        }
+    }
+    return results
+}
+
+internal fun readArpClients(): List<TetheredClientInfo> {
+    val file = File("/proc/net/arp")
+    if (!file.canRead()) return emptyList()
+    return runCatching {
+        file.bufferedReader().useLines { lines ->
+            lines.drop(1).mapNotNull { line ->
+                val tokens = line.trim().split(Regex("\\s+"))
+                if (tokens.size >= 4 && tokens[3] != "00:00:00:00:00:00") {
+                    val ip = tokens[0]
+                    val mac = tokens[3]
+                    TetheredClientInfo(mac = mac, ip = ip, hostname = null, tetheringType = -1)
+                } else null
+            }.toList()
+        }
+    }.getOrDefault(emptyList())
+}
+
+internal fun mergeTetheredClients(
+    systemClients: List<TetheredClientInfo>,
+    arpClients: List<TetheredClientInfo>,
+): List<TetheredClientInfo> {
+    if (systemClients.isEmpty()) return arpClients
+    if (arpClients.isEmpty()) return systemClients
+    val map = systemClients.associateBy { if (it.ip.isNotEmpty()) it.ip else it.mac }.toMutableMap()
+    for (arp in arpClients) {
+        val key = if (arp.ip.isNotEmpty()) arp.ip else arp.mac
+        if (!map.containsKey(key)) {
+            map[key] = arp
+        }
+    }
+    return map.values.toList()
+}
