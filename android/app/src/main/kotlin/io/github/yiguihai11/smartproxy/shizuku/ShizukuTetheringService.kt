@@ -1085,13 +1085,6 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         return directory.absolutePath
     }
 
-    private fun relocateRoutingFilesForShell(engineContent: String, stagedDir: String): String {
-        val json = runCatching { JSONObject(engineContent) }.getOrElse { return engineContent }
-        val routing = json.optJSONObject("routing") ?: JSONObject().also { json.put("routing", it) }
-        routing.put("chnroute_file", File(stagedDir, "chnroute.txt").absolutePath)
-        routing.put("acl_file", File(stagedDir, "acl.txt").absolutePath)
-        return json.toString()
-    }
 
     private fun readEngineConfig(coreLease: ICoreTetheringLease): String {
         val descriptor = coreLease.openEngineConfig()
@@ -1241,5 +1234,22 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
             .processNameSuffix("shizuku_tethering")
             .debuggable(BuildConfig.DEBUG)
             .version(USER_SERVICE_VERSION)
+
+        internal fun relocateRoutingFilesForShell(engineContent: String, stagedDir: String): String {
+            val json = runCatching { JSONObject(engineContent) }.getOrElse { return engineContent }
+            val routing = json.optJSONObject("routing") ?: JSONObject().also { json.put("routing", it) }
+            routing.put("chnroute_file", File(stagedDir, "chnroute.txt").absolutePath)
+            routing.put("acl_file", File(stagedDir, "acl.txt").absolutePath)
+
+            // 共享热点路由是专用的特权流量转发引擎，主应用已在运行并监听 admin_port (:9090) 与 SOCKS5 端口。
+            // 若特权引擎也去绑定相同端口，立即报 bind: address already in use (-2 失败)。
+            // 共享引擎完全不需要 Web 管理面板与本地代理监听器，将 admin_port/admin_socket/port 均置零屏蔽。
+            val listen = json.optJSONObject("listen") ?: JSONObject().also { json.put("listen", it) }
+            listen.put("admin_port", 0)
+            listen.put("admin_socket", "")
+            listen.put("port", 0)
+
+            return json.toString()
+        }
     }
 }

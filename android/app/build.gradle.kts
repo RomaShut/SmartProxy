@@ -145,4 +145,5 @@ dependencies {
 
     // 单元测试(JUnit 4):测试 TetheringUiState / TetheringPlatformCompat / TetheringCoreSync。
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
