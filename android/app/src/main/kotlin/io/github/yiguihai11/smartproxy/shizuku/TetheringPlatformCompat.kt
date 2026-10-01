@@ -372,7 +372,7 @@ internal fun parseArpLines(
             // 2. 必须严格属于激活的下游共享接口（如 ap0, swlan0, rndis0 等）
             if (!downstreamInterfaces.contains(iface)) return@mapNotNull null
 
-            val type = inferLegacyTetheringType(iface) ?: -1
+            val type = TetheringPlatformCompat.inferLegacyTetheringType(iface) ?: -1
             createTetheredClientInfo(mac = mac, ip = ip, hostname = null, tetheringType = type)
         } else null
     }.toList()
