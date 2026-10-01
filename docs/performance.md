@@ -64,7 +64,7 @@ func (h *Handler) isDNSCleanAndPrefer(ctx, wire, qname) (out []byte, preferCache
 
 ## §6 协议栈基准测试与对比（Benchmark）
 
-SmartProxy 支持 5 种 TUN 协议栈实现（`gvisor`、`lwip`、`system`、`mixed`、`go`）。为了解各协议栈在真实场景下的开销特征与性能边界，在相同基准测试套件（Ubuntu 24.04 x86_64 4-Core Runner）下执行了基准评测：
+SmartProxy 支持 5 种 TUN 协议栈实现（`gvisor`、`lwip`、`system`、`mixed`、`go`）。为了解各协议栈在真实场景下的开销特征与性能边界，在相同基准测试套件（ubuntu-latest, x86_64 4-Core Runner）下执行了基准评测：
 
 ```bash
 go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/

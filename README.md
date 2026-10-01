@@ -54,7 +54,7 @@ SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限�
 
 ### 实测基准数据 (Benchmark)
 
-> **测试环境**：GitHub Actions CI Runner (Ubuntu 24.04 x86_64, 4-Core)。  
+> **测试环境**：GitHub Actions CI Runner (ubuntu-latest, x86_64 4-Core)。  
 > **执行命令**：`go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/`  
 > *注：表中吞吐率为协议栈内存层面的封包/解包微基准测试上限，实际外网传输速度取决于物理网卡、上游节点带宽与网络延迟。*
 
