@@ -3,6 +3,8 @@ package io.github.yiguihai11.smartproxy
 import io.github.yiguihai11.smartproxy.shizuku.HotspotRoutingConfig
 import io.github.yiguihai11.smartproxy.shizuku.inferDeviceOs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -112,5 +114,55 @@ class TetheringDeviceParserTest {
         assertEquals("局域网设备 (私有/随机 MAC)", inferDeviceOs(null, null, isRandomMac = true))
         assertEquals("未知设备", inferDeviceOs(null, null, isRandomMac = false))
         assertEquals("iOS (iPhone)", inferDeviceOs("iPhone-15", null, isRandomMac = true))
+    }
+
+    @Test
+    fun blockedClientsFlaggedAndOfflineBlockedDevicesAppended() {
+        val statsJson = """
+            {
+              "clients": [
+                {
+                  "mac": "12:34:56:78:9a:bc",
+                  "ip": "192.168.140.204",
+                  "hostname": "Active-Phone",
+                  "type": 0,
+                  "vendor": "",
+                  "is_random_mac": false,
+                  "os_guess": "Android"
+                },
+                {
+                  "mac": "aa:bb:cc:dd:ee:01",
+                  "ip": "192.168.140.205",
+                  "hostname": "Blocked-Phone",
+                  "type": 0,
+                  "vendor": "",
+                  "is_random_mac": false,
+                  "os_guess": "Android"
+                }
+              ],
+              "blocked_clients": [
+                "aa:bb:cc:dd:ee:01",
+                "aa:bb:cc:dd:ee:99"
+              ],
+              "apps": []
+            }
+        """.trimIndent()
+
+        val devices = TetheringDeviceParser.parse(statsJson)
+        assertEquals(3, devices.size)
+
+        val activeDev = devices.firstOrNull { it.mac == "12:34:56:78:9a:bc" }
+        assertNotNull(activeDev)
+        assertFalse(activeDev!!.isBlocked)
+
+        val blockedOnlineDev = devices.firstOrNull { it.mac == "aa:bb:cc:dd:ee:01" }
+        assertNotNull(blockedOnlineDev)
+        assertTrue(blockedOnlineDev!!.isBlocked)
+        assertEquals("192.168.140.205", blockedOnlineDev.ip)
+
+        val blockedOfflineDev = devices.firstOrNull { it.mac == "aa:bb:cc:dd:ee:99" }
+        assertNotNull(blockedOfflineDev)
+        assertTrue(blockedOfflineDev!!.isBlocked)
+        assertEquals("", blockedOfflineDev.ip)
     }
 }

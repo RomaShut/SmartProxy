@@ -255,9 +255,46 @@ class NetworkStatusActivity : ComponentActivity() {
                         onBack = { finish() }
                     )
                     selectedTetheredDevice?.let { dev ->
-                        val latest = tetheredDevices.values.firstOrNull { it.ip == dev.ip } ?: dev
+                        val latest = tetheredDevices.values.firstOrNull {
+                            (dev.mac.isNotBlank() && it.mac.equals(dev.mac, ignoreCase = true)) ||
+                                (dev.ip.isNotBlank() && it.ip == dev.ip)
+                        } ?: dev
                         TetheredDeviceDetailDialog(
                             device = latest,
+                            onBlockDevice = { mac ->
+                                val svc = tetheringService
+                                if (svc != null) {
+                                    scope.launch {
+                                        val ok = withContext(Dispatchers.IO) {
+                                            runCatching { svc.blockClient(mac) }.getOrDefault(false)
+                                        }
+                                        if (ok) {
+                                            Toast.makeText(this@NetworkStatusActivity, R.string.device_block_success, Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(this@NetworkStatusActivity, R.string.device_block_failed, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } else {
+                                    Toast.makeText(this@NetworkStatusActivity, R.string.shizuku_operation_failed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onUnblockDevice = { mac ->
+                                val svc = tetheringService
+                                if (svc != null) {
+                                    scope.launch {
+                                        val ok = withContext(Dispatchers.IO) {
+                                            runCatching { svc.unblockClient(mac) }.getOrDefault(false)
+                                        }
+                                        if (ok) {
+                                            Toast.makeText(this@NetworkStatusActivity, R.string.device_unblock_success, Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(this@NetworkStatusActivity, R.string.device_unblock_failed, Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } else {
+                                    Toast.makeText(this@NetworkStatusActivity, R.string.shizuku_operation_failed, Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             onDismiss = { selectedTetheredDevice = null }
                         )
                     }

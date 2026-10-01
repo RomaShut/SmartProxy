@@ -5,8 +5,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.IpPrefix
 import android.net.LinkAddress
-import android.net.LinkProperties
+import android.net.MacAddress
 import android.net.Network
+import android.net.wifi.SoftApConfiguration
+import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -81,6 +83,9 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
         requireNotNull(
             shellContext.getSystemService(ConnectivityManager::class.java)
         ) { "ConnectivityManager is unavailable" }
+    }
+    private val wifiManager by lazy {
+        shellContext.getSystemService(WifiManager::class.java)
     }
 
     // routingWorker 独占写;getStatus 在 binder 线程读,@Volatile 保证可见性。
@@ -745,11 +750,61 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
             "{\"apps\":[]}"
         }
 
+        val blockedArr = JSONArray()
+        for (mac in getBlockedClientList()) {
+            blockedArr.put(mac)
+        }
+
         return runCatching {
             val statsObj = JSONObject(rawStats)
             statsObj.put("clients", clientsArr)
+            statsObj.put("blocked_clients", blockedArr)
             statsObj.toString()
         }.getOrDefault(rawStats)
+    }
+
+    override fun getBlockedClientList(): Array<String> {
+        val wm = wifiManager ?: return emptyArray()
+        return runCatching {
+            val config = wm.softApConfiguration ?: return@runCatching emptyArray<String>()
+            config.blockedClientList.map { it.toString().lowercase() }.toTypedArray()
+        }.getOrDefault(emptyArray())
+    }
+
+    override fun blockClient(mac: String): Boolean {
+        val wm = wifiManager ?: return false
+        val cleanMac = mac.trim().lowercase()
+        return runCatching {
+            val targetMac = MacAddress.fromString(cleanMac)
+            val currentConfig = wm.softApConfiguration ?: return@runCatching false
+            val currentList = currentConfig.blockedClientList
+            if (currentList.contains(targetMac)) return@runCatching true
+
+            val updatedList = currentList + targetMac
+            val newConfig = SoftApConfiguration.Builder(currentConfig)
+                .setClientControlByUserEnabled(true)
+                .setBlockedClientList(updatedList)
+                .build()
+            wm.setSoftApConfiguration(newConfig)
+        }.getOrDefault(false)
+    }
+
+    override fun unblockClient(mac: String): Boolean {
+        val wm = wifiManager ?: return false
+        val cleanMac = mac.trim().lowercase()
+        return runCatching {
+            val targetMac = MacAddress.fromString(cleanMac)
+            val currentConfig = wm.softApConfiguration ?: return@runCatching false
+            val currentList = currentConfig.blockedClientList
+            if (!currentList.contains(targetMac)) return@runCatching true
+
+            val updatedList = currentList.filter { it != targetMac }
+            val newConfig = SoftApConfiguration.Builder(currentConfig)
+                .setClientControlByUserEnabled(true)
+                .setBlockedClientList(updatedList)
+                .build()
+            wm.setSoftApConfiguration(newConfig)
+        }.getOrDefault(false)
     }
 
     override fun destroy() {

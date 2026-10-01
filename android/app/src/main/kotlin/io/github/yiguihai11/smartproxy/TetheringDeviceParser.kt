@@ -82,6 +82,13 @@ object TetheringDeviceParser {
                 connsBySrcIp[HotspotRoutingConfig.SHIZUKU_TUN_IP_V4] = natConns
             }
 
+            val blockedArr = root.optJSONArray("blocked_clients") ?: JSONArray()
+            val blockedSet = HashSet<String>()
+            for (i in 0 until blockedArr.length()) {
+                val b = blockedArr.optString(i, "").trim().lowercase()
+                if (b.isNotEmpty()) blockedSet.add(b)
+            }
+
             val allIps = (clientByIp.keys + connsBySrcIp.keys).filter { it.isNotBlank() }.toSet()
             val list = mutableListOf<TetheredDeviceDetail>()
             for (ip in allIps) {
@@ -97,6 +104,7 @@ object TetheringDeviceParser {
                 val conns = connsBySrcIp[ip] ?: emptyList()
                 val up = conns.sumOf { it.up }
                 val down = conns.sumOf { it.down }
+                val isBlocked = mac.isNotBlank() && mac.lowercase() in blockedSet
 
                 val osGuess = when {
                     rawOsGuess.isNotBlank() -> rawOsGuess
@@ -125,9 +133,36 @@ object TetheringDeviceParser {
                         upBytes = up,
                         downBytes = down,
                         conns = conns,
+                        isBlocked = isBlocked,
                     )
                 )
             }
+
+            // 处理已被黑名单拦截但当前不在线（未连接）的设备，确保仍能在管理列表中展示并支持一键解除
+            val addedMacs = list.map { it.mac.lowercase() }.filter { it.isNotEmpty() }.toSet()
+            for (bMac in blockedSet) {
+                if (bMac !in addedMacs) {
+                    val vendor = io.github.yiguihai11.smartproxy.shizuku.lookupMacVendor(bMac).orEmpty()
+                    val isRandom = io.github.yiguihai11.smartproxy.shizuku.isLocallyAdministeredMac(bMac)
+                    val osGuess = io.github.yiguihai11.smartproxy.shizuku.inferDeviceOs(null, vendor.ifEmpty { null }, isRandom)
+                    list.add(
+                        TetheredDeviceDetail(
+                            ip = "",
+                            mac = bMac,
+                            hostname = "",
+                            vendor = vendor,
+                            isRandomMac = isRandom,
+                            osGuess = osGuess,
+                            tetheringType = -1,
+                            upBytes = 0L,
+                            downBytes = 0L,
+                            conns = emptyList(),
+                            isBlocked = true,
+                        )
+                    )
+                }
+            }
+
             list
         }.getOrDefault(emptyList())
     }

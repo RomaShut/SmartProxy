@@ -17,23 +17,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Laptop
 import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material.icons.outlined.TabletAndroid
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -61,6 +71,7 @@ data class TetheredDeviceDetail(
     val upBps: Long = 0L,
     val downBps: Long = 0L,
     val conns: List<ConnStatsRec> = emptyList(),
+    val isBlocked: Boolean = false,
 )
 
 /**
@@ -71,8 +82,12 @@ data class TetheredDeviceDetail(
 fun TetheredDeviceDetailDialog(
     device: TetheredDeviceDetail,
     onDismiss: () -> Unit,
+    onBlockDevice: ((String) -> Unit)? = null,
+    onUnblockDevice: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    var showBlockConfirm by remember { mutableStateOf(false) }
+    var showUnblockConfirm by remember { mutableStateOf(false) }
 
     val purpleText = if (ThemeState.isDark) Color(0xFFF6B8CF) else Color(0xFFD66E9B)
     val purpleFill = if (ThemeState.isDark) Color(0xFFC25E87) else Color(0xFFD66E9B)
@@ -159,16 +174,22 @@ fun TetheredDeviceDetailDialog(
                             overflow = TextOverflow.Ellipsis
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            val statusColor = if (device.isBlocked) Color(0xFFE87C7C) else onlineGreen
+                            val statusText = if (device.isBlocked) {
+                                stringResource(R.string.device_status_blocked)
+                            } else {
+                                stringResource(R.string.device_status_online)
+                            }
                             Box(
                                 modifier = Modifier
                                     .size(7.dp)
-                                    .background(onlineGreen, CircleShape)
+                                    .background(statusColor, CircleShape)
                             )
                             Spacer(Modifier.width(5.dp))
                             Text(
-                                text = stringResource(R.string.device_status_online),
+                                text = statusText,
                                 fontSize = 11.sp,
-                                color = onlineGreen,
+                                color = statusColor,
                                 fontWeight = FontWeight.Medium
                             )
                             if (device.isRandomMac) {
@@ -394,7 +415,44 @@ fun TetheredDeviceDetailDialog(
                     }
                 }
 
-                Spacer(Modifier.height(16.dp))
+                // ── 设备黑名单操作 (仅当存在有效 MAC 地址且提供了操作回调时展示) ──
+                if (device.mac.isNotBlank() && (onBlockDevice != null || onUnblockDevice != null)) {
+                    val isBlocked = device.isBlocked
+                    val actionColor = if (isBlocked) Color(0xFF2EBD85) else Color(0xFFE87C7C)
+                    OutlinedButton(
+                        onClick = {
+                            if (isBlocked) {
+                                showUnblockConfirm = true
+                            } else {
+                                showBlockConfirm = true
+                            }
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = actionColor),
+                        border = BorderStroke(1.dp, actionColor),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isBlocked) Icons.Outlined.CheckCircle else Icons.Outlined.Block,
+                            contentDescription = null,
+                            tint = actionColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(
+                                if (isBlocked) R.string.device_unblock_action
+                                else R.string.device_block_action
+                            ),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = actionColor
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
 
                 // 底部关闭按钮
                 Button(
@@ -414,6 +472,76 @@ fun TetheredDeviceDetailDialog(
                 }
             }
         }
+    }
+
+    if (showBlockConfirm) {
+        AlertDialog(
+            onDismissRequest = { showBlockConfirm = false },
+            title = { Text(stringResource(R.string.device_block_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.device_block_confirm_msg,
+                        device.hostname.ifBlank { device.ip.ifBlank { device.mac } }
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBlockConfirm = false
+                        onBlockDevice?.invoke(device.mac)
+                        onDismiss()
+                    }
+                ) {
+                    Text(
+                        text = stringResource(R.string.btn_confirm),
+                        color = Color(0xFFE87C7C),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBlockConfirm = false }) {
+                    Text(stringResource(R.string.btn_cancel))
+                }
+            }
+        )
+    }
+
+    if (showUnblockConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnblockConfirm = false },
+            title = { Text(stringResource(R.string.device_unblock_action)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.device_unblock_confirm_msg,
+                        device.hostname.ifBlank { device.ip.ifBlank { device.mac } }
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showUnblockConfirm = false
+                        onUnblockDevice?.invoke(device.mac)
+                        onDismiss()
+                    }
+                ) {
+                    Text(
+                        text = stringResource(R.string.btn_confirm),
+                        color = Color(0xFF2EBD85),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnblockConfirm = false }) {
+                    Text(stringResource(R.string.btn_cancel))
+                }
+            }
+        )
     }
 }
 

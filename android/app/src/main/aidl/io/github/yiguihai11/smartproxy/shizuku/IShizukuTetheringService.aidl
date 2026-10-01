@@ -15,5 +15,8 @@ interface IShizukuTetheringService {
     void setStatusListener(ITetheringStatusListener listener) = 15;
     String getTetheredClients() = 16;
     String getTetheringConnectionStats() = 17;
+    String[] getBlockedClientList() = 18;
+    boolean blockClient(String mac) = 19;
+    boolean unblockClient(String mac) = 20;
     void destroy() = 16777114;
 }

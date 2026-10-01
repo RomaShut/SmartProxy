@@ -289,4 +289,16 @@
     <string name="device_copied_to_clipboard">已复制 %1$s 到剪贴板</string>
     <string name="cd_device_info">设备详情</string>
     <string name="cd_copy">复制到剪贴板</string>
+    <string name="device_status_blocked">已拉黑</string>
+    <string name="device_block_action">拉黑设备 (踢出并禁止联网)</string>
+    <string name="device_unblock_action">解除拉黑 (允许联网)</string>
+    <string name="device_block_confirm_title">拉黑设备确认</string>
+    <string name="device_block_confirm_msg">确定要将该设备（%1$s）加入热点黑名单吗？该设备将立即被踢下线并禁止连入热点，您可以随时在此处解除拉黑。</string>
+    <string name="device_unblock_confirm_msg">确定要将该设备（%1$s）移出黑名单吗？解除后该设备可重新连入热点。</string>
+    <string name="device_blocked_section_title">已拉黑设备</string>
+    <string name="device_blocked_empty">暂无拉黑设备</string>
+    <string name="device_block_success">已将设备加入热点黑名单并踢下线</string>
+    <string name="device_block_failed">拉黑操作失败</string>
+    <string name="device_unblock_success">已解除设备拉黑</string>
+    <string name="device_unblock_failed">解除拉黑失败</string>
 </resources>

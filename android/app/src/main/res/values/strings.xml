@@ -289,4 +289,16 @@
     <string name="device_copied_to_clipboard">Copied %1$s to clipboard</string>
     <string name="cd_device_info">Device details</string>
     <string name="cd_copy">Copy to clipboard</string>
+    <string name="device_status_blocked">Blocked</string>
+    <string name="device_block_action">Block device (Disconnect &amp; ban)</string>
+    <string name="device_unblock_action">Unblock device</string>
+    <string name="device_block_confirm_title">Block device</string>
+    <string name="device_block_confirm_msg">Are you sure you want to block this device (%1$s)? It will be disconnected immediately and prevented from reconnecting. You can unblock it anytime.</string>
+    <string name="device_unblock_confirm_msg">Are you sure you want to unblock this device (%1$s)? It will be allowed to reconnect to the hotspot.</string>
+    <string name="device_blocked_section_title">Blocked devices</string>
+    <string name="device_blocked_empty">No blocked devices</string>
+    <string name="device_block_success">Device blocked and disconnected</string>
+    <string name="device_block_failed">Failed to block device</string>
+    <string name="device_unblock_success">Device unblocked</string>
+    <string name="device_unblock_failed">Failed to unblock device</string>
 </resources>

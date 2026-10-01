@@ -9,10 +9,12 @@ import android.net.Uri
 import android.os.IBinder
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Refresh
@@ -252,6 +255,56 @@ fun TetheringDialog(
 
     fun toast(text: String) {
         Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+    }
+
+    fun blockClient(mac: String) {
+        val service = tetheringService ?: run {
+            toast(R.string.shizuku_operation_failed)
+            return
+        }
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { service.blockClient(mac) }.getOrDefault(false)
+            }
+            if (ok) {
+                toast(R.string.device_block_success)
+                val statsJson = withContext(Dispatchers.IO) {
+                    runCatching { service.tetheringConnectionStats }.getOrNull()
+                }
+                if (!statsJson.isNullOrBlank()) {
+                    connectedDevices = withContext(Dispatchers.IO) {
+                        TetheringDeviceParser.parse(statsJson)
+                    }
+                }
+            } else {
+                toast(R.string.device_block_failed)
+            }
+        }
+    }
+
+    fun unblockClient(mac: String) {
+        val service = tetheringService ?: run {
+            toast(R.string.shizuku_operation_failed)
+            return
+        }
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { service.unblockClient(mac) }.getOrDefault(false)
+            }
+            if (ok) {
+                toast(R.string.device_unblock_success)
+                val statsJson = withContext(Dispatchers.IO) {
+                    runCatching { service.tetheringConnectionStats }.getOrNull()
+                }
+                if (!statsJson.isNullOrBlank()) {
+                    connectedDevices = withContext(Dispatchers.IO) {
+                        TetheringDeviceParser.parse(statsJson)
+                    }
+                }
+            } else {
+                toast(R.string.device_unblock_failed)
+            }
+        }
     }
 
     val statusListener = remember {
@@ -858,29 +911,32 @@ fun TetheringDialog(
                 }
 
                 // ── 可选: 已连接设备列表 ─────────────────────────
-                if (state.hotspotEnabled || state.usbEnabled || connectedDevices.isNotEmpty()) {
+                val activeClients = connectedDevices.filter { !it.isBlocked }
+                val blockedClients = connectedDevices.filter { it.isBlocked }
+
+                if (state.hotspotEnabled || state.usbEnabled || activeClients.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
                     TetheringSectionCard(
                         icon = Icons.Outlined.Devices,
                         title = stringResource(R.string.tethered_devices_title),
-                        status = if (connectedDevices.isEmpty()) {
+                        status = if (activeClients.isEmpty()) {
                             stringResource(R.string.tethered_devices_empty)
                         } else {
-                            stringResource(R.string.tethered_devices_count, connectedDevices.size)
+                            stringResource(R.string.tethered_devices_count, activeClients.size)
                         },
-                        statusColor = if (connectedDevices.isEmpty()) greyText else Color(0xFF2EBD85),
+                        statusColor = if (activeClients.isEmpty()) greyText else Color(0xFF2EBD85),
                         details = null,
                         cardColor = cardSurface,
                         titleColor = purpleDark,
                         detailColor = greyText
                     ) {
-                        if (connectedDevices.isNotEmpty()) {
+                        if (activeClients.isNotEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(top = 6.dp)
                             ) {
-                                connectedDevices.forEach { dev ->
+                                activeClients.forEach { dev ->
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
@@ -938,6 +994,82 @@ fun TetheringDialog(
                     }
                 }
 
+                // ── 可选: 已拉黑设备列表 ─────────────────────────
+                if (blockedClients.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    TetheringSectionCard(
+                        icon = Icons.Outlined.Block,
+                        title = stringResource(R.string.device_blocked_section_title),
+                        status = stringResource(R.string.tethered_devices_count, blockedClients.size),
+                        statusColor = Color(0xFFE87C7C),
+                        details = null,
+                        cardColor = cardSurface,
+                        titleColor = purpleDark,
+                        detailColor = greyText
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp)
+                        ) {
+                            blockedClients.forEach { dev ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selectedDeviceDetail = dev }
+                                        .padding(vertical = 6.dp, horizontal = 2.dp)
+                                ) {
+                                    Surface(
+                                        color = Color(0xFFEF5350).copy(alpha = 0.15f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = Icons.Outlined.Block,
+                                                contentDescription = null,
+                                                tint = Color(0xFFEF5350),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            text = dev.hostname.ifBlank { dev.mac.ifBlank { dev.ip } },
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = textDark,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = listOf(dev.mac, dev.ip).filter { it.isNotBlank() }.joinToString(" · "),
+                                            fontSize = 11.sp,
+                                            color = greyText,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = { unblockClient(dev.mac) },
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(28.dp)
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.device_unblock_action),
+                                            fontSize = 11.sp,
+                                            color = purpleText
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(16.dp))
 
                 // 底部关闭按钮
@@ -958,9 +1090,14 @@ fun TetheringDialog(
                 }
 
                 selectedDeviceDetail?.let { dev ->
-                    val current = connectedDevices.firstOrNull { it.ip == dev.ip } ?: dev
+                    val current = connectedDevices.firstOrNull {
+                        (dev.mac.isNotBlank() && it.mac.equals(dev.mac, ignoreCase = true)) ||
+                            (dev.ip.isNotBlank() && it.ip == dev.ip)
+                    } ?: dev
                     TetheredDeviceDetailDialog(
                         device = current,
+                        onBlockDevice = { mac -> blockClient(mac) },
+                        onUnblockDevice = { mac -> unblockClient(mac) },
                         onDismiss = { selectedDeviceDetail = null }
                     )
                 }
