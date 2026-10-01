@@ -154,7 +154,7 @@ object AppPrefs {
     const val MODE_VPN = "vpn"
     const val MODE_SOCKS5 = "socks5"
 
-    /** 协议栈:gvisor = 默认(免 Root,纯用户态);lwip = lwIP 栈(C / 高性能 / 免 Root);go = 原生 Go 栈(需 Root);system = 系统内核栈(需 Root);mixed = 混合栈(需 Root)。 */
+    /** 协议栈:gvisor = 默认(免 Root,纯用户态);lwip = 推荐(C / 轻量低内存 / 免 Root);go = 原生 Go 栈(需 Root);system = 系统内核栈(需 Root);mixed = 混合栈(需 Root)。 */
     const val STACK_GVISOR = "gvisor"
     const val STACK_LWIP = "lwip"
     const val STACK_GO = "go"

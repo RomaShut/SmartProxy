@@ -54,7 +54,7 @@ s, err := NewTUNStack(cfg.Stack, stackOpts)  // singtun.NewStack, 默认使用�
 要点：
 
 - `NewTUN` / `NewTUNStack` 是 `singtun.New` / `singtun.NewStack` 的别名（`handler.go` 底部 `var NewTUN = singtun.New; var NewTUNStack = singtun.NewStack`）。
-- **协议栈选择（gVisor 默认）**：`cfg.Stack` 默认值设为 `"gvisor"`（成熟、稳固、全平台兼容零拷贝；移动端 Android VpnService 必须使用此栈）；可选兼容支持 `"system"`、`"mixed"` 或实验性桌面 `"go"` 栈。如果传入空串 `""`，工程内部自动补全为 `"gvisor"` 保底。
+- **协议栈选择（gVisor 默认 / lwIP 推荐）**：`cfg.Stack` 默认值设为 `"gvisor"`（成熟稳固，移动端及全平台保持默认）；移动端强烈推荐使用全新实现的 `"lwip"`（极致轻量、零拷贝高吞吐、极低 GC 压力）；可选兼容支持 `"system"`、`"mixed"` 或实验性桌面 `"go"` 栈。如果传入空串 `""`，工程内部自动补全为 `"gvisor"` 保底。
 - **内存压力感知（MemoryPressure）**：通过 `StackOptions.MemoryPressure` 接口注入当前系统内存压力级别。在 Android 端联动 `ComponentCallbacks2.onTrimMemory`，在低内存时及时收缩 TCP 缓冲区以防被系统 OOM Killer 杀进程。
 - **透明重定向（AutoRedirect）**：`AutoRedirectMarkMode` 支持配合 Linux nftables 对打标流量自动重定向进 TUN。
 - **UDPTimeout/ICMPTimeout 必须非零**：sing-tun 的 UDP forwarder 在 `timeout == 0` 时内部 `udpnat.New` 会直接 panic（源码注释记录：此前漏设导致 TUN 无法启动）。本项目显式设为 `5min / 30s`。
