@@ -689,6 +689,9 @@ func (h *TUNHandler) handleGenericUDP(ctx context.Context, conn N.PacketConn, so
 		cur, ok := remotes[key]
 		if !ok || cur.isProxy { // 会话已清理 / 早已是代理(竞态重复切换)
 			mu.Unlock()
+			if pentry.wd != nil {
+				pentry.wd.Stop()
+			}
 			pentry.conn.Close()
 			return
 		}
@@ -696,6 +699,9 @@ func (h *TUNHandler) handleGenericUDP(ctx context.Context, conn N.PacketConn, so
 		remotes[key] = pentry
 		mu.Unlock()
 		// 关掉旧直连:其 reader 见 wd.Dead 静默退出,不会经 errCh 误杀整个会话
+		if cur.wd != nil {
+			cur.wd.Stop()
+		}
 		cur.conn.Close()
 		ll.Info("UDP QUIC flow switched to proxy after blackhole", "dst", destination)
 	}
@@ -836,6 +842,9 @@ func (h *TUNHandler) handleGenericUDP(ctx context.Context, conn N.PacketConn, so
 		mu.Lock()
 		if existing, ok := remotes[key]; ok {
 			mu.Unlock()
+			if entry.wd != nil {
+				entry.wd.Stop()
+			}
 			entry.conn.Close()
 			return existing, nil
 		}
@@ -943,6 +952,9 @@ func (h *TUNHandler) handleGenericUDP(ctx context.Context, conn N.PacketConn, so
 
 	mu.Lock()
 	for _, entry := range remotes {
+		if entry.wd != nil {
+			entry.wd.Stop()
+		}
 		entry.conn.Close()
 	}
 	mu.Unlock()

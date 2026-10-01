@@ -12,6 +12,10 @@ import (
 	"smartproxy/internal/trace"
 )
 
+// DefaultHalfCloseTimeout is the maximum duration to wait for the remaining direction
+// to finish after one direction has closed, preventing indefinite goroutine/socket leaks.
+const DefaultHalfCloseTimeout = 15 * time.Second
+
 var (
 	ActiveConns     atomic.Int32
 	ProxyBytesUp    atomic.Int64
@@ -73,13 +77,27 @@ func TCPRelay(ctx context.Context, client, remote net.Conn, proxy bool, prefix [
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	firstDone := make(chan struct{}, 2)
+
 	safego.Go("relay.tcp.c2r", func() {
 		defer wg.Done()
+		defer func() {
+			select {
+			case firstDone <- struct{}{}:
+			default:
+			}
+		}()
 		up.Store(relayDirection(ctx, remote, client, "c2r", proxy, nil))
 	})
 
 	safego.Go("relay.tcp.r2c", func() {
 		defer wg.Done()
+		defer func() {
+			select {
+			case firstDone <- struct{}{}:
+			default:
+			}
+		}()
 		down.Store(relayDirection(ctx, client, remote, "r2c", proxy, prefix))
 	})
 
@@ -89,6 +107,11 @@ func TCPRelay(ctx context.Context, client, remote net.Conn, proxy bool, prefix [
 		close(done)
 	})
 
+	halfCloseTimeout := ro.halfCloseTimeout
+	if halfCloseTimeout <= 0 {
+		halfCloseTimeout = DefaultHalfCloseTimeout
+	}
+
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -96,6 +119,22 @@ func TCPRelay(ctx context.Context, client, remote net.Conn, proxy bool, prefix [
 		client.Close()
 		remote.Close()
 		wg.Wait()
+	case <-firstDone:
+		timer := time.NewTimer(halfCloseTimeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			ll.Debug("TCP relay cancelled by context", "error", ctx.Err())
+			client.Close()
+			remote.Close()
+			wg.Wait()
+		case <-timer.C:
+			ll.Debug("TCP relay half-close timed out, force closing connections")
+			client.Close()
+			remote.Close()
+			wg.Wait()
+		}
 	}
 	// wg.Wait 与两个方向 goroutine 的 Done 同步,up/down 此刻已定;不加原子也安全,
 	// atomic 仅为局部读数防呆。

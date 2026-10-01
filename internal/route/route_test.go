@@ -728,6 +728,102 @@ func TestRouter_AddToBlacklistAndWatchdogTimeout(t *testing.T) {
 	}
 }
 
+func TestEstablishConnection_UDPOnlyFallback(t *testing.T) {
+	proxyHit := make(chan struct{}, 1)
+	addr, stop := startMockSOCKS5Server(t, proxyHit)
+	defer stop()
+
+	cn := chnroute.New()
+	mgr, err := upstream.NewManager(upstream.UpstreamConfig{
+		Default: "failover",
+		Proxies: []upstream.ProxyEntry{
+			{Alias: "default_proxy", URL: fmt.Sprintf("socks5://%s", addr)},
+			{Alias: "udp_only_proxy", URL: "socks5://127.0.0.1:54321", UDPInTCP: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Stop()
+
+	r := New(cn, mgr, true, 3*time.Second, nil, 300*time.Second)
+
+	dir := t.TempDir()
+	rulesFile := filepath.Join(dir, "rules.txt")
+	os.WriteFile(rulesFile, []byte("proxy ip 1.2.3.4 udp_only_proxy\n"), 0644)
+	eng, err := rules.New(rulesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, isProxy, err := r.EstablishConnection(ctx, "1.2.3.4", 80, "", eng)
+	if err != nil {
+		t.Fatalf("expected fallback to default proxy on udp_only proxy, got error: %v", err)
+	}
+	if conn != nil {
+		defer conn.Close()
+	}
+	if !isProxy {
+		t.Errorf("expected isProxy=true, got false")
+	}
+	select {
+	case <-proxyHit:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fallback default proxy connection")
+	}
+}
+
+func TestSmartConnectWithFallback_UDPOnlyFallback(t *testing.T) {
+	proxyHit := make(chan struct{}, 1)
+	addr, stop := startMockSOCKS5Server(t, proxyHit)
+	defer stop()
+
+	cn := chnroute.New()
+	mgr, err := upstream.NewManager(upstream.UpstreamConfig{
+		Default: "failover",
+		Proxies: []upstream.ProxyEntry{
+			{Alias: "default_proxy", URL: fmt.Sprintf("socks5://%s", addr)},
+			{Alias: "udp_only_proxy", URL: "socks5://127.0.0.1:54321", UDPInTCP: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Stop()
+
+	r := New(cn, mgr, true, 3*time.Second, nil, 300*time.Second)
+
+	dir := t.TempDir()
+	rulesFile := filepath.Join(dir, "rules.txt")
+	os.WriteFile(rulesFile, []byte("proxy ip 1.2.3.4 udp_only_proxy\n"), 0644)
+	eng, err := rules.New(rulesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, isProxy, err := r.SmartConnectWithFallback(ctx, "1.2.3.4", 80, "", []byte("GET / HTTP/1.1\r\n\r\n"), eng)
+	if err != nil {
+		t.Fatalf("expected fallback to default proxy on udp_only proxy, got error: %v", err)
+	}
+	if conn != nil {
+		defer conn.Close()
+	}
+	if !isProxy {
+		t.Errorf("expected isProxy=true, got false")
+	}
+	select {
+	case <-proxyHit:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fallback default proxy connection")
+	}
+}
+
 
 
 

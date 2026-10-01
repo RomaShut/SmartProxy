@@ -440,3 +440,39 @@ func TestTCPRelay_CloseWriterReaderInterface(t *testing.T) {
 		t.Error("expected CloseWrite or CloseRead to be invoked on remote wrapper")
 	}
 }
+
+func TestTCPRelay_HalfCloseTimeout(t *testing.T) {
+	clientR, clientW := makeConnPair(t)
+	remoteR, remoteW := makeConnPair(t)
+	defer clientW.Close()
+	defer remoteW.Close()
+
+	done := make(chan struct{})
+	go func() {
+		// TCPRelay called with background context (no timeout), but 100ms halfCloseTimeout
+		TCPRelay(context.Background(), clientR, remoteR, false, nil, WithHalfCloseTimeout(100*time.Millisecond))
+		close(done)
+	}()
+
+	// Client sends data and closes write
+	clientW.Write([]byte("request data"))
+	if cw, ok := clientW.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	} else {
+		clientW.Close()
+	}
+
+	// Remote reads request data, but hangs and NEVER sends response or closes
+	buf := make([]byte, 64)
+	n, err := remoteW.Read(buf)
+	if err != nil || string(buf[:n]) != "request data" {
+		t.Fatalf("remote failed to read request data: %v", err)
+	}
+
+	select {
+	case <-done:
+		// Succeeded: TCPRelay force-closed the hung connection and returned cleanly
+	case <-time.After(2 * time.Second):
+		t.Fatal("TCPRelay hung indefinitely instead of timing out via halfCloseTimeout")
+	}
+}

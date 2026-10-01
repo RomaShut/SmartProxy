@@ -202,8 +202,12 @@ func (r *Router) EstablishConnection(ctx context.Context, host string, port int,
 		return conn, true, nil
 	case result != "fallback":
 		if selected.IsUDPOnly() {
-			ll.Warn("rule selected a udp_only proxy for TCP", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port)
-			return nil, false, errors.New("proxy is udp_only, cannot serve TCP")
+			ll.Warn("rule selected a udp_only proxy for TCP, falling back to default proxy", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port)
+			conn, err := r.upstreamMgr.ConnectDefault(ctx, host, port)
+			if err != nil {
+				return nil, false, errors.New("failed to connect via default upstream proxy")
+			}
+			return conn, true, nil
 		}
 		ll.Info("using proxy alias from rule", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port, "domain", domain)
 		conn, err := selected.Connect(ctx, host, port)
@@ -305,8 +309,16 @@ func (r *Router) SmartConnectWithFallback(ctx context.Context, host string, port
 		return conn, nil, true, nil
 	case result != "fallback":
 		if selected.IsUDPOnly() {
-			ll.Warn("rule selected a udp_only proxy for TCP", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port)
-			return nil, nil, false, errors.New("proxy is udp_only, cannot serve TCP")
+			ll.Warn("rule selected a udp_only proxy for TCP, falling back to default proxy", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port)
+			conn, err := r.upstreamMgr.ConnectDefault(ctx, host, port)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if _, err := conn.Write(firstPkt); err != nil {
+				conn.Close()
+				return nil, nil, false, err
+			}
+			return conn, nil, true, nil
 		}
 		ll.Info("using proxy alias from rule", "url", upstream.MaskProxyURL(selected.URL), "host", host, "port", port, "domain", domain)
 		conn, err := selected.Connect(ctx, host, port)

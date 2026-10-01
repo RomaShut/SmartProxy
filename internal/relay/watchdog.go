@@ -47,7 +47,8 @@ type WatchdogConfig struct {
 type RelayOption func(*relayOptions)
 
 type relayOptions struct {
-	watchdog *WatchdogConfig
+	watchdog         *WatchdogConfig
+	halfCloseTimeout time.Duration
 }
 
 // WithWatchdog enables the early-stage watchdog on direct connections to detect
@@ -55,6 +56,14 @@ type relayOptions struct {
 func WithWatchdog(cfg WatchdogConfig) RelayOption {
 	return func(o *relayOptions) {
 		o.watchdog = &cfg
+	}
+}
+
+// WithHalfCloseTimeout sets the grace period allowed for the remaining direction to
+// finish after one direction has completed.
+func WithHalfCloseTimeout(timeout time.Duration) RelayOption {
+	return func(o *relayOptions) {
+		o.halfCloseTimeout = timeout
 	}
 }
 

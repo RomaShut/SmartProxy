@@ -674,18 +674,22 @@ func (hc *HealthChecker) checkLoop(ctx context.Context, stopCh <-chan struct{}, 
 		initialDelay = time.Duration(160 + (idx%20)*50) * time.Millisecond
 	}
 
-	select {
-	case <-time.After(initialDelay):
-	case <-stopCh:
-		if initialWg != nil {
-			initialWg.Done()
+	if initialDelay > 0 {
+		initialTimer := time.NewTimer(initialDelay)
+		defer initialTimer.Stop()
+		select {
+		case <-initialTimer.C:
+		case <-stopCh:
+			if initialWg != nil {
+				initialWg.Done()
+			}
+			return
+		case <-ctx.Done():
+			if initialWg != nil {
+				initialWg.Done()
+			}
+			return
 		}
-		return
-	case <-ctx.Done():
-		if initialWg != nil {
-			initialWg.Done()
-		}
-		return
 	}
 
 	hc.checkProxyWithContext(ctx, stopCh, p)
@@ -693,15 +697,19 @@ func (hc *HealthChecker) checkLoop(ctx context.Context, stopCh <-chan struct{}, 
 		initialWg.Done()
 	}
 
+	intervalTimer := time.NewTimer(time.Minute)
+	defer intervalTimer.Stop()
+
 	for {
 		cfg := hc.cfg.Load()
 		interval := time.Duration(cfg.Interval) * time.Second
 		if interval <= 0 {
 			interval = 60 * time.Second
 		}
+		intervalTimer.Reset(interval)
 
 		select {
-		case <-time.After(interval):
+		case <-intervalTimer.C:
 		case <-stopCh:
 			return
 		case <-ctx.Done():
