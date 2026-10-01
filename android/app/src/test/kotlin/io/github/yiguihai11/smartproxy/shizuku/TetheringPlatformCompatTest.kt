@@ -96,4 +96,30 @@ class TetheringPlatformCompatTest {
         assertEquals(true, second.isRandomMac)
         assertEquals(null, second.vendor) // random MAC masks physical vendor OUI
     }
+
+    @Test
+    fun parseArpLinesFiltersUpstreamGatewayAndMatchesDownstream() {
+        val arpContent = """
+            IP address       HW type     Flags       HW address            Mask     Device
+            192.168.0.1      0x1         0x2         00:11:22:33:44:55     *        wlan0
+            192.168.43.15    0x1         0x2         aa:bb:cc:dd:ee:ff     *        ap0
+            192.168.43.16    0x1         0x2         11:22:33:44:55:66     *        rndis0
+        """.trimIndent()
+
+        // 1. 下游为空（未开启热点/共享）时，不解析任何条目
+        assertEquals(emptyList<TetheredClientInfo>(), parseArpLines(arpContent.lineSequence(), emptySet(), setOf("wlan0")))
+
+        // 2. 下游激活 ap0，上游为 wlan0：只保留 ap0 上的设备，192.168.0.1 (wlan0 上游网关) 坚决被过滤
+        val parsed = parseArpLines(arpContent.lineSequence(), setOf("ap0"), setOf("wlan0"))
+        assertEquals(1, parsed.size)
+        assertEquals("192.168.43.15", parsed[0].ip)
+        assertEquals("aa:bb:cc:dd:ee:ff", parsed[0].mac)
+
+        // 3. 同时开启 USB 共享 rndis0
+        val dual = parseArpLines(arpContent.lineSequence(), setOf("ap0", "rndis0"), setOf("wlan0"))
+        assertEquals(2, dual.size)
+        assertEquals(true, dual.any { it.ip == "192.168.43.15" })
+        assertEquals(true, dual.any { it.ip == "192.168.43.16" })
+        assertEquals(false, dual.any { it.ip == "192.168.0.1" })
+    }
 }

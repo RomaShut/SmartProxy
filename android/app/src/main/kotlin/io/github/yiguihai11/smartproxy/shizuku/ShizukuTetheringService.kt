@@ -680,8 +680,18 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
 
     override fun getTetheredClients(): String {
         val monitor = upstreamMonitor
+        val downstreamIfaces = (monitor?.currentInterfaces ?: runCatching { getTetheredInterfaces() }.getOrNull())
+            ?.map { it.name }
+            ?.toSet()
+            .orEmpty()
+        val upstreamIfaces = monitor?.currentInterfaceNames.orEmpty()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+
         val systemClients = monitor?.currentClients.orEmpty()
-        val arpClients = readArpClients()
+        val arpClients = readArpClients(downstreamIfaces, upstreamIfaces)
         val clients = mergeTetheredClients(systemClients, arpClients)
         val arr = JSONArray()
         for (client in clients) {
@@ -700,8 +710,18 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
 
     override fun getTetheringConnectionStats(): String {
         val monitor = upstreamMonitor
+        val downstreamIfaces = (monitor?.currentInterfaces ?: runCatching { getTetheredInterfaces() }.getOrNull())
+            ?.map { it.name }
+            ?.toSet()
+            .orEmpty()
+        val upstreamIfaces = monitor?.currentInterfaceNames.orEmpty()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+
         val systemClients = monitor?.currentClients.orEmpty()
-        val arpClients = readArpClients()
+        val arpClients = readArpClients(downstreamIfaces, upstreamIfaces)
         val clients = mergeTetheredClients(systemClients, arpClients)
 
         val clientsArr = JSONArray()

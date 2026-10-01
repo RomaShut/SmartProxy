@@ -430,6 +430,9 @@ class NetworkStatusActivity : ComponentActivity() {
                 val up = conns.sumOf { it.up }
                 val down = conns.sumOf { it.down }
 
+                // 连接详情页仅展示有实际连接或流量记录的设备，无连接/无流量的设备不在实时连接列表中占位
+                if (conns.isEmpty() && up == 0L && down == 0L) continue
+
                 val synthUid = -1000 - (Math.abs(ip.hashCode()) % 10000)
 
                 val label = buildString {

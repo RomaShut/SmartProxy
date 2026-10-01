@@ -353,19 +353,41 @@ internal fun extractTetheredClients(collection: Collection<*>): List<TetheredCli
     return results
 }
 
-internal fun readArpClients(): List<TetheredClientInfo> {
+internal fun parseArpLines(
+    lines: Sequence<String>,
+    downstreamInterfaces: Set<String> = emptySet(),
+    upstreamInterfaces: Set<String> = emptySet(),
+): List<TetheredClientInfo> {
+    if (downstreamInterfaces.isEmpty()) return emptyList()
+    return lines.drop(1).mapNotNull { line ->
+        val tokens = line.trim().split(Regex("\\s+"))
+        if (tokens.size >= 6 && tokens[3] != "00:00:00:00:00:00") {
+            val ip = tokens[0]
+            val mac = tokens[3]
+            val iface = tokens[5]
+
+            // 1. 如果属于上游出口接口(如手机连接的 Wi-Fi wlan0)，坚决丢弃，防止将上游 Wi-Fi 网关误判为热点客户端
+            if (upstreamInterfaces.contains(iface)) return@mapNotNull null
+
+            // 2. 必须严格属于激活的下游共享接口（如 ap0, swlan0, rndis0 等）
+            if (!downstreamInterfaces.contains(iface)) return@mapNotNull null
+
+            val type = inferLegacyTetheringType(iface) ?: -1
+            createTetheredClientInfo(mac = mac, ip = ip, hostname = null, tetheringType = type)
+        } else null
+    }.toList()
+}
+
+internal fun readArpClients(
+    downstreamInterfaces: Set<String> = emptySet(),
+    upstreamInterfaces: Set<String> = emptySet(),
+): List<TetheredClientInfo> {
+    if (downstreamInterfaces.isEmpty()) return emptyList()
     val file = File("/proc/net/arp")
     if (!file.canRead()) return emptyList()
     return runCatching {
         file.bufferedReader().useLines { lines ->
-            lines.drop(1).mapNotNull { line ->
-                val tokens = line.trim().split(Regex("\\s+"))
-                if (tokens.size >= 4 && tokens[3] != "00:00:00:00:00:00") {
-                    val ip = tokens[0]
-                    val mac = tokens[3]
-                    createTetheredClientInfo(mac = mac, ip = ip, hostname = null, tetheringType = -1)
-                } else null
-            }.toList()
+            parseArpLines(lines, downstreamInterfaces, upstreamInterfaces)
         }
     }.getOrDefault(emptyList())
 }
