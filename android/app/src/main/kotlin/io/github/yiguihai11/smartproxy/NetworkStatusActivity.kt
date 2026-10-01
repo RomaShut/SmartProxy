@@ -98,7 +98,7 @@ import org.json.JSONObject
  *  - UID→包名/图标:懒解析 + 缓存(复用 AppEnumerator 图标缓存),只解快照里出现的 app。
  */
 
-private data class ConnStatsRec(
+data class ConnStatsRec(
     val proto: Int,
     val host: String,
     val port: Int,
