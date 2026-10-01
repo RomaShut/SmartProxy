@@ -790,12 +790,13 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
 
             val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
             val builder = builderClass.getConstructor(config.javaClass).newInstance(config)
-            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, true)
+            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, false)
             builderClass.getMethod("setBlockedClientList", java.util.List::class.java).invoke(builder, updatedList)
             val newConfig = builderClass.getMethod("build").invoke(builder)
 
             val setSoftApConfigMethod = wm.javaClass.getMethod("setSoftApConfiguration", config.javaClass)
             val res = setSoftApConfigMethod.invoke(wm, newConfig)
+            Log.i(TAG, "blockClient: applied softApConfig for $mac, res=$res, blockedCount=${updatedList.size}")
             (res as? Boolean) ?: true
         }.onFailure { Log.e(TAG, "blockClient failed for $mac", it) }.getOrDefault(false)
     }
@@ -816,12 +817,13 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
 
             val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
             val builder = builderClass.getConstructor(config.javaClass).newInstance(config)
-            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, true)
+            builderClass.getMethod("setClientControlByUserEnabled", java.lang.Boolean.TYPE).invoke(builder, false)
             builderClass.getMethod("setBlockedClientList", java.util.List::class.java).invoke(builder, updatedList)
             val newConfig = builderClass.getMethod("build").invoke(builder)
 
             val setSoftApConfigMethod = wm.javaClass.getMethod("setSoftApConfiguration", config.javaClass)
             val res = setSoftApConfigMethod.invoke(wm, newConfig)
+            Log.i(TAG, "unblockClient: applied softApConfig for $mac, res=$res, blockedCount=${updatedList.size}")
             (res as? Boolean) ?: true
         }.onFailure { Log.e(TAG, "unblockClient failed for $mac", it) }.getOrDefault(false)
     }
