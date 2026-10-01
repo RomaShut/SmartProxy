@@ -9,201 +9,241 @@
 [![codecov](https://img.shields.io/codecov/c/github/yiguihai11/SmartProxy)](https://codecov.io/gh/yiguihai11/SmartProxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-高性能智能路由代理：TUN 全局透明代理 + 标准 SOCKS5 服务双入口，自动国内外分流、DNS 反污染与 IP 优选、DPI 域名识别、多上游负载与健康检查、配置热重载。
+SmartProxy 是一个用 Go 语言编写的高性能透明代理与智能路由系统。支持 TUN 虚拟网卡与标准 SOCKS5 服务双入口，内置国内外流量自动分流、DNS 反污染与 IP 优选、DPI 协议特征提取、多上游负载与健康探测、配置实时热重载，并提供功能完整的 Android 客户端。
 
-## 🚀 核心特性
+---
 
-- **双入口**：系统级 TUN 透明代理（支持 lwip / gvisor / system / mixed / go 五大协议栈）+ SOCKS5 服务端，ACL 统一放行/阻断/分流
-- **多上游**：SOCKS5/SOCKS5H/SOCKS4/HTTP(S) 与**内置 Shadowsocks（`ss://`，TCP+UDP）** 上游，健康检查熔断 + failover / round_robin / random / latency 选路；TCP 与 UDP 各自独立熔断，UDP 走主动 DNS 探测
-- **智能分流**：基于 chnroute Trie 的国内外分流；80/443「先直连、失败回退代理」；直连失败自动加入动态黑名单
-- **DNS 反污染**：污染检测、IP 优选（ping/tcp 探测）、缓存 + singleflight 并发合并
-- **规则引擎（ACL）**：`allow`/`block`/`proxy` × `port`/`ip`/`cidr`/`domain`（含 `*.` 通配），Copy-on-Write 无锁快照
-- **DPI**：从首包提取 TLS SNI / HTTP Host，IP 阶段即可按域名分流
-- **热重载**：config.json / acl.txt / chnroute.txt 均支持事件驱动热更新，无需重启
-- **高性能**：COW 无锁读、sync.Pool 缓冲复用、TCP splice 零拷贝、并发全链路 race 测试
-- **Web 管理面板**：纯 Go dashboard（config / ACL / chnroute / 日志在线编辑），fsnotify 热重载即时生效，HTTPS + 可选 Basic Auth
-- **Android 客户端**：Kotlin + Compose 全功能 App —— VPN 隧道 / 仅代理（SOCKS5）双服务模式、按应用实时流量与单条封禁、per-app 分流、DNS 注入、排除路由、开机自启
-- **全平台**：Linux / Windows / Darwin 可编译；Android/iOS 通过 fd 模式接入（见下文）
+## 📌 核心功能与设计
 
-## 📊 TUN 协议栈全量性能基准 (TUN Stacks Benchmark)
+- **双入口接入**：
+  - **TUN 透明代理**：支持 `gvisor`、`lwip`、`system`、`mixed`、`go` 五种协议栈，支持常规桌面模式与移动端 fd 托管模式。
+  - **SOCKS5 服务端**：支持标准 TCP CONNECT 与 UDP ASSOCIATE，支持多地址/双栈监听。
+- **智能分流与回退**：
+  - 基于 chnroute 前缀树（Trie）实现国内外 IP 路由决策。
+  - Web 端口（80/443）支持“先直连、失败回退代理”机制，直连超时自动加入动态黑名单，减少白名单漏判造成的阻断。
+- **规则引擎 (ACL)**：
+  - 支持 `allow` / `block` / `proxy` 操作，涵盖端口、单 IP、CIDR 网段与域名（含 `*.` 通配符）。
+  - 核心规则集使用不可变快照与原子指针（Copy-on-Write），读操作无需获取互斥锁。
+- **DNS 反污染与 IP 优选**：
+  - 国内 DNS 直连配合 chnroute 校验防止污染，异常时回退到远端无污染 DNS。
+  - 针对多 A/AAAA 记录可启用 TCP/Ping 延迟探测与 IP 优选。
+  - 采用 singleflight 机制合并突发并发查询，降低重复请求开销。
+- **DPI 协议探测**：
+  - 从连接首包中主动识别 TLS ClientHello (SNI) 与 HTTP Host 头部，即使无域名解析也可基于域名规则分流。
+- **多上游节点管理**：
+  - 协议支持：SOCKS5、SOCKS5H、SOCKS4、HTTP(S) 及 Shadowsocks (`ss://`，TCP+UDP)。
+  - 调度策略：支持 `failover`（主备容灾）、`round_robin`（轮询）、`random`（随机）与 `latency`（延迟优先）。
+  - 健康检查：TCP 与 UDP 具备独立的主动探测与熔断恢复状态机。
+- **配置与数据热重载**：
+  - `config.json`、`acl.txt`、`chnroute.txt` 监听文件系统变更事件（fsnotify），就地原子换新，无需重启服务。
+- **内置 Web 控制台**：
+  - 启动即随附轻量管理面板（默认 9090 端口，HTTPS + 可选身份认证），支持在线编辑配置、规则调整与日志实时流过滤。
+- **跨平台与 Android 客户端**：
+  - 支持 Linux、macOS、Windows；通过 Android Jetpack Compose 客户端提供无缝的移动端体验（VPN 隧道与仅代理双模式）。
 
-SmartProxy 原生支持 5 种 TUN 协议栈实现，可在不同设备环境与权限要求下灵活选用：
-- **`lwip`**（移动端推荐）：轻量级 C 语言协议栈（Lightweight IP），零内存拷贝 + 极低 GC 压力，支持非 Root（Android VpnService）与 Linux/桌面环境。
-- **`gvisor`**（移动端默认）：Google gVisor 用户态 Go 协议栈，全平台成熟稳定，支持非 Root 与 Linux/桌面环境。
-- **`system`**：操作系统内核原生协议栈，TCP 直接交由主机内核网络栈处理，需 Root / 内核权限。
-- **`mixed`**：混合协议栈（TCP 走 System 内核栈，UDP 走 gVisor 用户态栈），需 Root / 内核权限。
-- **`go`**：sing-tun 原生纯 Go 协议栈，需 Root / 内核权限。
+---
 
-### 1. UDP 吞吐量对比 (`BenchmarkStack_UDP_Throughput`)
+## 📊 TUN 协议栈特性与性能基准
 
-> 测试条件：1400 字节 UDP 包连续吞吐，统计单包延迟 (ns/op)、吞吐带宽 (MB/s)、单包堆内存消耗 (B/op) 与 Go 运行时分配次数 (allocs/op)。
+SmartProxy 支持 5 种 TUN 协议栈实现，可在不同设备环境与权限要求下灵活选用：
+- **`gvisor`（全平台默认）**：Google 开源的成熟用户态 Go 栈。并发多协程驱动，TCP 握手快（~40 µs），全平台无需 CGO 编译即可运行，生态兼容性好，适合通用场景。
+- **`lwip`（移动端推荐）**：轻量级 C 语言协议栈（Lightweight IP）。单连接内存开销极低（~574 B），0 次 Go 运行时堆分配，UDP 吞吐高，非常适合 Android 客户端长期后台驻留防 OOM/LMK 杀进程；但单核定时轮询调度特性使其单个 TCP 握手开销稍大（~1 ms）。
+- **`system`**：利用 Linux 内核网络栈直接处理 TCP，性能强但需系统 root / `CAP_NET_ADMIN` 特权。
+- **`mixed`**：混合协议栈（TCP 走 System 内核栈，UDP 走 gVisor 用户态栈），需系统特权。
+- **`go`**：纯 Go 原生简易栈，主要用于开发参考与测试。
 
-#### CI 云端测试环境 (Linux x86_64 / AMD EPYC 7763 64-Core)
-| 协议栈 | 特性分类 | 权限要求 | 单包耗时 (ns/op) | 吞吐量 (MB/s) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+### 实测基准数据 (Benchmark)
+
+> **测试环境**：GitHub Actions CI Runner (Ubuntu 24.04 x86_64, 4-Core)。  
+> **执行命令**：`go test -tags "with_gvisor,with_lwip" -bench="BenchmarkStack_" -benchmem -benchtime=500x -run=^$ ./internal/tun/`  
+> *注：表中吞吐率为协议栈内存层面的封包/解包微基准测试上限，实际外网传输速度取决于物理网卡、上游节点带宽与网络延迟。*
+
+#### 1. UDP 吞吐量对比 (`BenchmarkStack_UDP_Throughput`, 1400 字节连续报文)
+
+| 协议栈 | 架构分类 | 权限要求 | 单包耗时 (ns/op) | 内存处理吞吐 | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **77.0 ns** | **18,178 MB/s (18.1 GB/s)** | **0 B** | **0 allocs** |
-| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | **78.9 ns** | **17,744 MB/s (17.7 GB/s)** | **137 B** | **0 allocs** |
-| **`system`** | 主机内核原生协议栈 | 需 Root | 114.6 ns | 12,216 MB/s (12.2 GB/s) | 14 B | 0 allocs |
-| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | 3,666 ns | 381.9 MB/s | 432 B | 3 allocs |
-| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | 11,041 ns | 126.8 MB/s | 4,919 B | 0 allocs |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | **77.4 ns** | **18,091.6 MB/s (18.1 GB/s)** | **0 B** | **0 allocs** |
+| **`system`** | 主机原生内核协议栈 | 需 Root | 118.0 ns | 11,863.6 MB/s (11.9 GB/s) | 15 B | 0 allocs |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | **137.8 ns** | **10,156.8 MB/s (10.2 GB/s)** | **135 B** | **0 allocs** |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | 3,415.0 ns | 410.0 MB/s | 551 B | 3 allocs |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 11,586.0 ns | 120.8 MB/s | 4,948 B | 0 allocs |
 
-#### 移动端真机测试环境 (Android / ARM64 Cortex)
-| 协议栈 | 特性分类 | 权限要求 | 单包耗时 (ns/op) | 吞吐量 (MB/s) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) |
+#### 2. TCP 握手开销对比 (`BenchmarkStack_TCP_Handshake`, 三次握手建连)
+
+| 协议栈 | 架构分类 | 权限要求 | 握手耗时 (ns/op) | 堆内存消耗 (B/op) | Go 堆分配 (allocs/op) | 适用场景分析 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | **~174 ns** | **~8,028 MB/s (8.0 GB/s)** | **3 B** | **0 allocs** |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | ~455 ns | ~3,070 MB/s (3.0 GB/s) | 18 B | 0 allocs |
-| **`system`** | 主机内核原生协议栈 | 需 Root | ~875 ns | ~1,598 MB/s (1.6 GB/s) | 27 B | 1 allocs |
-| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | ~4,796 ns | ~291 MB/s | 663 B | 3 allocs |
-| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | ~6,419 ns | ~218 MB/s | 5,068 B | 0 allocs |
+| **`system`** | 主机内核原生协议栈 | 需 Root | **2,050 ns (~2.1 µs)** | **375 B** | **5 allocs** | 具备特权的服务器极速转发 |
+| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 3,204 ns (~3.2 µs) | 375 B | 5 allocs | 具备特权的混合转发场景 |
+| **`gvisor`** | 用户态 Go 语言栈 (Google gVisor) | **非 Root 兼容** | **39,659 ns (~39.7 µs)** | 2,043 B | 27 allocs | **通用默认**：网页浏览短连接并发快，无 CGO |
+| **`go`** | 纯 Go 原生简易协议栈 | 需 Root | 402,877 ns (~403 µs) | 722 B | 5 allocs | 开发测试参考 |
+| **`lwip`** | 用户态 C 语言栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,152 ns (~1.0 ms) | **574 B** | **7 allocs** | **移动端推荐**：低内存 Footprint，超高持续吞吐，零 GC 抖动 |
 
-### 2. TCP 握手与连接构建开销对比 (`BenchmarkStack_TCP_Handshake`)
+更深入的设计考量与优化细节见 [docs/performance.md](./docs/performance.md)。
 
-| 协议栈 | 特性分类 | 权限要求 | CI 握手耗时 (ns/op) | 单连接堆内存 (B/op) | Go 堆分配 (allocs/op) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **`system`** | 主机内核原生协议栈 | 需 Root | **2,484 ns** | **375 B** | **5 allocs** |
-| **`mixed`** | 混合栈 (Kernel TCP + gVisor UDP) | 需 Root | 2,509 ns | 375 B | 5 allocs |
-| **`lwip`** | 用户态 C 栈 (Lightweight IP) | **非 Root 兼容** | ~1,004,411 ns *(含步进调度)* | **574 B** | **7 allocs** |
-| **`gvisor`** | 用户态 Go 栈 (Google gVisor) | **非 Root 兼容** | 22,553 ns | 2,042 B | 27 allocs |
-| **`go`** | 纯 Go 原生用户态协议栈 | 需 Root | 393,066 ns | 728 B | 5 allocs |
+---
 
-> **性能关键发现**：
-> - **UDP 高吞吐场景**（如 DNS 解析、QUIC/HTTP3 流媒体、游戏联机）：`lwip` 展现出极其出色的吞吐能力，单包耗时仅需 **78 ns**（CI 云端）/ **174 ns**（手机端），速度达到 gVisor 的 **~27–46 倍**，且全程保持 **0 次 Go 运行时堆分配**。
-> - **内存 Footprint 与 GC 压制**：在非 Root 环境下，`lwip` 的 TCP 单连接内存开销仅为 `gvisor` 的 **~28%**（574 B vs 2042 B），GC 分配减少超过 **74%**（7 allocs vs 27 allocs），有效避免长驻后台时 Android 低内存杀进程（LMK）。
+## 🛠️ 快速上手
 
-## 🛠️ 快速开始
+### 1. 编译构建
+
+要求 Go 1.25 或更高版本：
 
 ```bash
-make build            # 编译当前平台（默认带 with_gvisor，含 TUN 支持）
-make build-all        # 交叉编译所有支持平台
+# 编译当前平台（默认包含 gvisor 协议栈）
+make build
+
+# 交叉编译多平台发布包（Linux / Darwin / Windows）
+make build-all
 ```
 
-启动需要三个文件：`config.json`、`chnroute.txt`、`acl.txt`：
+如需在 Linux/桌面端启用 lwIP 协议栈，需安装 GCC 并包含编译标签：
+
+```bash
+go build -tags "with_gvisor,with_lwip" -o build/smartproxy ./cmd/smartproxy
+```
+
+### 2. 启动运行
+
+准备好配置文件（可参考项目自带的 `config.json`、`chnroute.txt` 与 `acl.txt`）：
 
 ```bash
 ./build/smartproxy config.json
 ```
 
+---
+
 ## 📝 配置示例
 
 ```json
 {
-  "listen": { "host": "::", "port": 1080 },
+  "listen": {
+    "host": "::",
+    "port": 1080,
+    "admin_port": 9090
+  },
+  "tun": {
+    "enabled": false,
+    "name": "smartproxy0",
+    "stack": "gvisor",
+    "mtu": 1500,
+    "inet4_address": "172.19.0.1/30"
+  },
   "upstream": {
     "default": "failover",
-    "proxies": [{ "alias": "ss-local", "url": "socks5://127.0.0.1:1081" }]
+    "proxies": [
+      {
+        "alias": "primary",
+        "url": "socks5://127.0.0.1:1081"
+      },
+      {
+        "alias": "backup",
+        "url": "ss://aes-128-gcm:password@1.2.3.4:8388"
+      }
+    ]
   },
-  "routing": { "chnroute_file": "chnroute.txt", "acl_file": "acl.txt" },
-  "dns": { "enabled": true, "foreign": { "ipv4": "8.8.8.8:53" } }
+  "routing": {
+    "chnroute_file": "chnroute.txt",
+    "acl_file": "acl.txt"
+  },
+  "dns": {
+    "enabled": true,
+    "foreign": {
+      "ipv4": "8.8.8.8:53"
+    }
+  }
 }
 ```
 
-完整字段见 [docs/config.md](./docs/config.md)，示例见 [config.json](./config.json)。
+完整配置字段说明详见 [docs/config.md](./docs/config.md)。
 
-> 每个上游的 TCP/UDP 能力**自动辨识，无需配置**：`socks5`/`socks5h`/`ss` 才可能支持 UDP，`http`/`https`/`socks4` 恒为 `tcp_only`。对 UDP-capable 节点，探测与真实流量共同推导出三态 mode（`tcp_and_udp`/`tcp_only`/`udp_only`，由 TCP/UDP 双熔断自动推出，`udp_only` 即「TCP 挂了但 UDP 正常」）与 UDP 能力标记（`standard`=标准 ASSOCIATE / `raw`=裸中继 / `none`=无 UDP）。`socks5`/`socks5h` 的 UDP 先走标准 UDP ASSOCIATE，**任意失败**（含 rep=0x07）自动兜底裸 UDP relay 到 `host:port`；已辨识为 raw 的节点后续直连裸中继、跳过注定失败的 ASSOCIATE，但每 10 分钟重检一次 ASSOCIATE，上游升级后自动回到 standard。详见 [docs/upstream.md](./docs/upstream.md) §3.2。
+---
 
-## 🖥️ Web 管理面板
+## 🖥️ Web 管理控制台
 
-引擎启动即起管理服务（`listen.admin_port`，默认 9090，HTTPS + 可选 Basic Auth）。浏览器打开：
+服务启动后，内置 Web 控制台默认监听 `https://127.0.0.1:9090`（支持自定义端口与可选 Basic Auth 认证）。
 
-- 桌面端：`https://127.0.0.1:9090`（或 `/dashboard`）
-- Android VPN 隧道模式：`https://smartproxy.lan:9090`（引擎接管 DNS，静态记录把域名解析到手机）
-- Android 仅代理模式：`https://127.0.0.1:9090`（本机开面板；QR 跨设备扫到的是扫描机自己）
+- **桌面端访问**：`https://127.0.0.1:9090`
+- **Android VPN 隧道模式**：`https://smartproxy.lan:9090`（内置 DNS 静态映射）
+- **主要能力**：
+  - `/` 或 `/dashboard`：可视化仪表盘，查看运行状态与活动连接。
+  - `GET/PUT /config`：实时查看与在线保存配置，保存后自动触发热重载生效。
+  - `/acl`：在线编辑与追加 ACL 访问控制规则。
+  - `/chnroute`：更新并校验国内 IP 路由表。
+  - `/logs`：环形内存日志查看，支持按日志级别（DEBUG/INFO/WARN/ERROR）过滤。
+  - `/stats` / `/blacklist` / `/health`：查看吞吐统计、动态黑名单列表与上游健康状况。
 
-| 端点 | 能力 |
-|------|------|
-| `/` `/dashboard` | 纯 Web UI（config / ACL / chnroute / 日志在线编辑） |
-| `GET/PUT /config` | 读改配置，fsnotify 热重载即时生效 |
-| `/acl` `/acl/add` | ACL 规则编辑、追加 |
-| `/chnroute` | chnroute 上传校验落盘 |
-| `/logs` `/logs/clear` | 环形缓冲日志 + level 过滤 |
-| `/stats` `/blacklist` `/cache` `/route` `/health` | 运行统计、动态黑名单、缓存、选路、健康检查 |
+详细 API 端点规范参见 [docs/admin-api.md](./docs/admin-api.md)。
 
-全量端点见 [docs/admin-api.md](./docs/admin-api.md)。
+---
 
-## 📖 ACL 规则速览
+## 📖 ACL 规则语法
 
-每行一条：`<action> <type> <value> [alias]`，`#` 注释，大小写不敏感。
+规则文件按行解析，格式为 `<action> <type> <value> [alias]`：
 
-| action | 说明 |
-|--------|------|
-| `allow` | 显式放行，跳过后续 block/proxy 检查 |
-| `block` | 拒绝并断开连接 |
-| `proxy` | 走指定上游代理，`alias` 对应 `upstream.proxies[].alias` |
-
-| type | 说明 | 示例 |
-|------|------|------|
-| `port` | 精确端口 | `80` |
-| `ip` | IP（含 `/` 自动按 CIDR） | `1.2.3.4` |
-| `cidr` | CIDR 前缀 | `10.0.0.0/8` |
-| `domain` | 域名（`*.` 通配子域，不含父域） | `*.google.com` |
-
-优先级：`allow` → `block` → `proxy` → 直连。`allow` 会阻止 `proxy` 命中；`proxy` 按出现顺序先匹配先胜出。
+- **动作 (action)**：`allow`（放行直连）、`block`（阻断拦截）、`proxy`（经指定代理节点）。
+- **类型 (type)**：`port`（端口）、`ip`（单个 IP）、`cidr`（IP 网段）、`domain`（域名，支持 `*.example.com` 子域匹配）。
+- **优先级**：`allow` > `block` > `proxy` > 默认路由分流。
 
 ```text
-proxy domain *.google.com primary      # Google 走 primary 代理
-block domain *.adnetwork.com           # 拦截广告
-proxy port 22 direct                   # SSH 强制直连（"direct" 为特殊别名）
+# 常用规则示例
+block domain *.adservice.com         # 拦截广告域名
+proxy domain *.google.com primary    # 指定域名走 primary 代理
+proxy cidr 198.51.100.0/24 backup    # 指定海外网段走 backup
+allow port 22                        # SSH 流量放行直连
 ```
 
-详见 [docs/rules-engine.md](./docs/rules-engine.md)。
+详细用法参见 [docs/rules-engine.md](./docs/rules-engine.md)。
 
-## 📚 开发文档
-
-| 文档 | 内容 |
-|------|------|
-| [架构总览](./docs/architecture.md) | 模块依赖、双入口链路、连接生命周期 |
-| [TUN 开发文档](./docs/tun.md) | sing-tun 集成、gvisor 栈、缓冲池、fd 模式、库接口对照 |
-| [规则引擎](./docs/rules-engine.md) | ACL 语法、优先级、COW 无锁快照 |
-| [智能路由](./docs/smart-routing.md) | 国内外分流、Smart Connect、动态黑名单 |
-| [SOCKS5 协议](./docs/socks5.md) | 握手 / CONNECT / UDP ASSOCIATE |
-| [DNS 处理](./docs/dns.md) | 反污染、IP 优选、域名劫持 |
-| [上游管理](./docs/upstream.md) | 健康检查熔断、选路策略 |
-| [DPI](./docs/dpi.md) | TLS SNI / HTTP Host 提取 |
-| [中继与缓冲池](./docs/relay.md) | 数据面转发与内存复用 |
-| [热重载](./docs/hot-reload.md) | fsnotify 事件驱动热更新 |
-| [配置参考](./docs/config.md) | 全部配置字段 + 命令行/daemon |
-| [Admin API](./docs/admin-api.md) | 全部管理端点说明 |
-| [性能优化](./docs/performance.md) | 无锁读、COW、缓冲池实践 |
+---
 
 ## 📱 Android 客户端
 
-全功能独立 App（Kotlin + Jetpack Compose，`android/`）。引擎经 `gomobile bind` 编译为 AAR 集成；APK 由 GitHub Actions 构建，四 ABI（arm64-v8a / armeabi-v7a / x86_64 / x86），版本号取自 git tag（两位 `x.y`，tag 后开发版形如 `1.0-3-g2d27600`）。
+项目提供原生 Android 客户端（源码位于 `android/`），基于 Kotlin + Jetpack Compose 构建，Go 核心引擎通过 `gomobile bind` 编译为 AAR 静态集成。
 
-**下载**：[GitHub Releases](https://github.com/yiguihai11/SmartProxy/releases/latest) 取分 ABI 签名包，按设备架构选：
+### 下载与安装
+可通过 [GitHub Releases](https://github.com/yiguihai11/SmartProxy/releases/latest) 下载对应 CPU 架构的签名安装包：
+- **`arm64-v8a`**：主流现代 Android 真机（推荐）
+- **`armeabi-v7a`**：旧款 32 位 ARM 设备
+- **`x86_64` / `x86`**：Android 模拟器或 x86 平板
 
-| APK | 适用 |
-|---|---|
-| `arm64-v8a` | 2017 年后绝大多数真机（默认下这个） |
-| `armeabi-v7a` | 老 32 位 ARM 机 |
-| `x86_64` / `x86` | 安卓模拟器（64 / 32 位） |
+### 双工作模式
+1. **VPN 隧道模式（默认）**：
+   - 系统级 `VpnService` 创建 TUN 虚拟接口，Go 引擎以 fd 托管模式接管设备全部流量。
+   - 支持按应用代理（Per-App Split Tunneling）、应用禁止联网、自定义 DNS 注入、路由排除。
+2. **仅代理模式（SOCKS5）**：
+   - 不创建系统 VPN，仅启动本地 SOCKS5 代理监听服务，供特定应用（如浏览器、Telegram）手动配置连接。
+   - 具备后台保活指引，降低 Android 后台限制导致的连接超时问题。
 
-固定 keystore 签名，可直接覆盖安装升级。
-
-**两种服务模式**（抽屉 → 服务模式）：
-- **VPN 隧道**（默认）：`VpnService` 建 TUN，引擎以 **fd 模式**接管全部流量，全局透明代理。
-- **仅代理（SOCKS5）**：不建 VpnService，只跑引擎 SOCKS5（`:1080`，默认全接口双栈，局域网可达）。⚠️ 无 VpnService 就没有系统「后台占网络」护身符——Android 15+ 后台会按 uid 掐掉网络，本地 SOCKS 连接出现「前台正常、后台超时」（SS 安卓同款现象）；App 在仅代理模式启动时引导后台放行——OriginOS（vivo/iQOO）弹自定义引导到「耗电管理→允许后台运行」（AOSP 豁免盖不住智能冻结），其它厂商弹系统「忽略电池优化」框。
-
-**功能**：
-- 首页：连接状态、IPv4/IPv6 开关、开机自启、管理面板入口（URL / 二维码 / 复制）。开关语义随服务模式切换：VPN 隧道 = 拦截（tun 接管该族流量）；仅代理 = SOCKS5 监听（双开/只 v6 = `::`、只 v4 = `0.0.0.0`）。
-- 抽屉：代理应用（per-app 分流与「禁止联网」，仅 VPN 隧道模式显示）、DNS 服务器注入（仅 VPN）、排除路由（仅 VPN）、服务模式、联网状态、日志查看。
-- 联网状态：按应用的实时连接与网速，页面打开才采集；单条连接可封禁（掐断现存连接 + 写 ACL）。
-- 日志：应用内查看页分 **Android / Go 双 tab**——Android 日志看 logcat（`SmartProxyVpn` 标签），Go 引擎日志经 logbuf 桥按 slog 等级读取与实时过滤，阈值可在页内直接设置。
-- 国际化：界面中英双语 —— 默认英文，系统语言为中文时自动切换中文。
-
-**构建**：
-
+### 移动端构建
 ```bash
-make android   # → build/smartproxy.aar（引擎库）
-# APK：GitHub Actions android-build 自动出包，或本地 cd android && ./gradlew assembleRelease
+# 1. 编译 Go 核心引擎 AAR (需配置 Android NDK 与 Go 环境)
+make android
+
+# 2. 编译 Android APK (可直接通过 Gradle 构建)
+cd android && ./gradlew assembleRelease
 ```
 
-核心调用：`Mobile.startRouter(configPath, tunFd, tunEnabled)`。fd 模式下传 TUN fd + `true`；仅代理模式传 `0, false`。fd 模式下 `tun.file_descriptor` 不读 JSON（仅由 `startRouter` 传入）、`auto_route` 强制 `false`、`inet4/6_address` 必须与 `VpnService.Builder` 一致。
+---
 
-**CI**：
-- `go-test`（GitHub Actions）：全部包测试 + 并发热点 race + `go vet` + 编译（每次 Go 改动）。
-- `android-build`（GitHub Actions + **CircleCI 双通道**）：Gradle `assembleRelease` 出四 ABI APK。2026-08 月 GitHub Actions 全球性故障后移植到 CircleCI，两条独立构建通道互为冗余。
-- `update-chnroute`：每月 1/15/30 号自动拉取 china-ip-list 更新 `chnroute.txt` 并推回 main。
+## 📚 详细设计文档
+
+| 专题文档 | 主要内容 |
+| :--- | :--- |
+| [架构总览](./docs/architecture.md) | 模块拓扑、双入口流程、生命周期设计 |
+| [TUN 开发文档](./docs/tun.md) | 协议栈接入、sing-tun 集成、fd 托管模式与缓冲区设计 |
+| [性能与基准测试](./docs/performance.md) | 无锁 COW 快照、缓冲复用、5 大网络栈实测基准数据 |
+| [规则引擎](./docs/rules-engine.md) | ACL 匹配原理、前缀树与通配符实现 |
+| [智能分流机制](./docs/smart-routing.md) | chnroute 决策、动态黑名单与失败快速回退 |
+| [SOCKS5 协议实现](./docs/socks5.md) | 握手、CONNECT、标准与裸 UDP 中继机制 |
+| [DNS 处理与反污染](./docs/dns.md) | 污染检测、IP 延迟探测优选与并发合并 |
+| [上游代理管理](./docs/upstream.md) | 健康检查、双向独立熔断与多策略选路 |
+| [DPI 协议探测](./docs/dpi.md) | TLS SNI 与 HTTP Host 首包解析原理 |
+| [热重载机制](./docs/hot-reload.md) | fsnotify 监听与原子快照交换实现 |
+| [配置完整参考](./docs/config.md) | 全量 JSON 字段、默认值及环境变量说明 |
+| [Admin API 参考](./docs/admin-api.md) | Web 面板所有 RESTful 端点调用规范 |
+
+---
 
 ## ⚖️ 开源协议
 
-MIT
+本项目采用 [MIT 许可证](https://opensource.org/licenses/MIT) 开源。
