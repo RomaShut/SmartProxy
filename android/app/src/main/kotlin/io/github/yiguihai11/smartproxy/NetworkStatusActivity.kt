@@ -386,80 +386,36 @@ class NetworkStatusActivity : ComponentActivity() {
         }
 
         runCatching {
-            val root = JSONObject(tetheringJson)
-            val clientsArr = root.optJSONArray("clients") ?: JSONArray()
-            val clientByIp = HashMap<String, JSONObject>()
-            for (i in 0 until clientsArr.length()) {
-                val c = clientsArr.getJSONObject(i)
-                val ip = c.optString("ip", "")
-                if (ip.isNotEmpty()) clientByIp[ip] = c
-            }
-
-            val appsArr = root.optJSONArray("apps") ?: JSONArray()
-            val connsBySrcIp = HashMap<String, ArrayList<ConnStatsRec>>()
-
-            for (i in 0 until appsArr.length()) {
-                val a = appsArr.getJSONObject(i)
-                val connsArr = a.optJSONArray("conns") ?: JSONArray()
-                for (j in 0 until connsArr.length()) {
-                    val c = connsArr.getJSONObject(j)
-                    val srcIp = c.optString("src_ip", "")
-                    val rec = ConnStatsRec(
-                        proto = c.getInt("proto"),
-                        host = c.getString("host"),
-                        port = c.getInt("port"),
-                        up = c.getLong("up"),
-                        down = c.getLong("down"),
-                        srcIp = srcIp,
-                    )
-                    connsBySrcIp.getOrPut(srcIp) { ArrayList() }.add(rec)
-                }
-            }
-
-            val allIps = (clientByIp.keys + connsBySrcIp.keys).filter { it.isNotBlank() }.toSet()
-            for (ip in allIps) {
-                val clientObj = clientByIp[ip]
-                val mac = clientObj?.optString("mac", "").orEmpty()
-                val hostname = clientObj?.optString("hostname", "").orEmpty()
-                val vendor = clientObj?.optString("vendor", "").orEmpty()
-                val isRandomMac = clientObj?.optBoolean("is_random_mac", false) ?: false
-                val osGuess = clientObj?.optString("os_guess", "").orEmpty()
-                val tetheringType = clientObj?.optInt("type", -1) ?: -1
-
-                val conns = connsBySrcIp[ip] ?: emptyList()
-                val up = conns.sumOf { it.up }
-                val down = conns.sumOf { it.down }
+            val tetheredList = TetheringDeviceParser.parse(tetheringJson)
+            for (dev in tetheredList) {
+                val conns = dev.conns
+                val up = dev.upBytes
+                val down = dev.downBytes
 
                 // 连接详情页仅展示有实际连接或流量记录的设备，无连接/无流量的设备不在实时连接列表中占位
                 if (conns.isEmpty() && up == 0L && down == 0L) continue
 
-                val synthUid = -1000 - (Math.abs(ip.hashCode()) % 10000)
+                val synthUid = -1000 - (Math.abs(dev.ip.hashCode()) % 10000)
 
                 val label = buildString {
                     append("📱 ")
-                    if (hostname.isNotBlank()) {
-                        append(hostname)
-                        append(" (").append(ip).append(")")
+                    if (dev.hostname.isNotBlank()) {
+                        append(dev.hostname)
+                        append(" (").append(dev.ip).append(")")
                     } else {
-                        append(ip)
+                        append(dev.ip)
                     }
                 }
-                val pkgDesc = if (mac.isNotBlank()) "MAC: $mac" else "热点外接设备"
+                val pkgDesc = when {
+                    dev.mac.isNotBlank() -> "MAC: ${dev.mac}"
+                    dev.ip == io.github.yiguihai11.smartproxy.shizuku.HotspotRoutingConfig.SHIZUKU_TUN_IP_V4 -> "多设备接入 · 内核统一转发"
+                    else -> "热点外接设备"
+                }
                 metaCache[synthUid] = AppMeta(label, null, pkgDesc)
 
-                tetheredDevices[synthUid] = TetheredDeviceDetail(
-                    ip = ip,
-                    mac = mac,
-                    hostname = hostname,
-                    vendor = vendor,
-                    isRandomMac = isRandomMac,
-                    osGuess = osGuess.ifBlank { "局域网接入设备" },
-                    tetheringType = tetheringType,
-                    upBytes = up,
-                    downBytes = down,
+                tetheredDevices[synthUid] = dev.copy(
                     upBps = 0L,
                     downBps = 0L,
-                    conns = conns,
                 )
 
                 out += AppStats(

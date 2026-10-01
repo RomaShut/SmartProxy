@@ -34,6 +34,9 @@ internal object HotspotRoutingConfig {
     const val SHIZUKU_TUN_ADDR_V6 = "2001:db8:9877::1/64"
     const val SHIZUKU_TUN_DNS_HINT_V6 = "fdfe:dcba:9877::53"
 
+    val SHIZUKU_TUN_IP_V4: String = SHIZUKU_TUN_ADDR_V4.substringBefore('/')
+    val SHIZUKU_TUN_IP_V6: String = SHIZUKU_TUN_ADDR_V6.substringBefore('/')
+
     fun parametersFromSnapshot(snapshot: HotspotRoutingSnapshot): HotspotRoutingParameters {
         requireRoutableSnapshot(snapshot)
         return HotspotRoutingParameters(

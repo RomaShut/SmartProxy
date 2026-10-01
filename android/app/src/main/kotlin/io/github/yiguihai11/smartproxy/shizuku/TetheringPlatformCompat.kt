@@ -251,7 +251,7 @@ internal fun lookupMacVendor(mac: String): String? {
     return MAC_OUI_TABLE[oui]
 }
 
-internal fun inferDeviceOs(hostname: String?, vendor: String?): String {
+internal fun inferDeviceOs(hostname: String?, vendor: String?, isRandomMac: Boolean = false): String {
     val host = hostname?.lowercase()?.trim().orEmpty()
     return when {
         host.contains("iphone") -> "iOS (iPhone)"
@@ -287,6 +287,7 @@ internal fun inferDeviceOs(hostname: String?, vendor: String?): String {
             "Sony" -> "PlayStation / Sony"
             else -> vendor
         }
+        isRandomMac -> "局域网设备 (私有/随机 MAC)"
         else -> "未知设备"
     }
 }
@@ -300,7 +301,7 @@ internal fun createTetheredClientInfo(
     val cleanMac = mac.trim().lowercase()
     val isRandom = if (cleanMac.isNotEmpty()) isLocallyAdministeredMac(cleanMac) else false
     val vendor = if (cleanMac.isNotEmpty() && !isRandom) lookupMacVendor(cleanMac) else null
-    val os = inferDeviceOs(hostname, vendor)
+    val os = inferDeviceOs(hostname, vendor, isRandom)
     return TetheredClientInfo(
         mac = cleanMac,
         ip = ip.trim(),

@@ -231,67 +231,8 @@ fun TetheringDialog(
                 runCatching { service.tetheringConnectionStats }.getOrNull()
             }
             if (!statsJson.isNullOrBlank()) {
-                runCatching {
-                    val root = JSONObject(statsJson)
-                    val clientsArr = root.optJSONArray("clients") ?: JSONArray()
-                    val clientByIp = HashMap<String, JSONObject>()
-                    for (i in 0 until clientsArr.length()) {
-                        val c = clientsArr.getJSONObject(i)
-                        val ip = c.optString("ip", "")
-                        if (ip.isNotEmpty()) clientByIp[ip] = c
-                    }
-
-                    val appsArr = root.optJSONArray("apps") ?: JSONArray()
-                    val connsBySrcIp = HashMap<String, ArrayList<ConnStatsRec>>()
-                    for (i in 0 until appsArr.length()) {
-                        val a = appsArr.getJSONObject(i)
-                        val connsArr = a.optJSONArray("conns") ?: JSONArray()
-                        for (j in 0 until connsArr.length()) {
-                            val c = connsArr.getJSONObject(j)
-                            val srcIp = c.optString("src_ip", "")
-                            connsBySrcIp.getOrPut(srcIp) { ArrayList() }.add(
-                                ConnStatsRec(
-                                    proto = c.getInt("proto"),
-                                    host = c.getString("host"),
-                                    port = c.getInt("port"),
-                                    up = c.getLong("up"),
-                                    down = c.getLong("down"),
-                                    srcIp = srcIp,
-                                )
-                            )
-                        }
-                    }
-
-                    val allIps = (clientByIp.keys + connsBySrcIp.keys).filter { it.isNotBlank() }.toSet()
-                    val list = mutableListOf<TetheredDeviceDetail>()
-                    for (ip in allIps) {
-                        val clientObj = clientByIp[ip]
-                        val mac = clientObj?.optString("mac", "").orEmpty()
-                        val hostname = clientObj?.optString("hostname", "").orEmpty()
-                        val vendor = clientObj?.optString("vendor", "").orEmpty()
-                        val isRandomMac = clientObj?.optBoolean("is_random_mac", false) ?: false
-                        val osGuess = clientObj?.optString("os_guess", "").orEmpty()
-                        val tetheringType = clientObj?.optInt("type", -1) ?: -1
-                        val conns = connsBySrcIp[ip] ?: emptyList()
-                        val up = conns.sumOf { it.up }
-                        val down = conns.sumOf { it.down }
-
-                        list.add(
-                            TetheredDeviceDetail(
-                                ip = ip,
-                                mac = mac,
-                                hostname = hostname,
-                                vendor = vendor,
-                                isRandomMac = isRandomMac,
-                                osGuess = osGuess.ifBlank { "局域网接入设备" },
-                                tetheringType = tetheringType,
-                                upBytes = up,
-                                downBytes = down,
-                                conns = conns,
-                            )
-                        )
-                    }
-                    connectedDevices = list
+                connectedDevices = withContext(Dispatchers.IO) {
+                    TetheringDeviceParser.parse(statsJson)
                 }
             }
             delay(2000L)
