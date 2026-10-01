@@ -35,32 +35,17 @@ type udpSendReq struct {
 	doneChan chan error
 }
 
-var udpSendReqPool = sync.Pool{
-	New: func() any {
-		return &udpSendReq{
-			doneChan: make(chan error, 1),
-		}
-	},
-}
-
-func getUDPSendReq(connID uint64, isIPv6 bool, srcIP net.IP, srcPort uint16, data []byte) *udpSendReq {
-	req := udpSendReqPool.Get().(*udpSendReq)
-	req.connID = connID
-	req.isIPv6 = isIPv6
-	req.srcIP = srcIP
-	req.srcPort = srcPort
-	req.data = data
-	return req
-}
-
-func putUDPSendReq(req *udpSendReq) {
-	select {
-	case <-req.doneChan:
-	default:
+func newUDPSendReq(connID uint64, isIPv6 bool, srcIP net.IP, srcPort uint16, data []byte) *udpSendReq {
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	return &udpSendReq{
+		connID:   connID,
+		isIPv6:   isIPv6,
+		srcIP:    srcIP,
+		srcPort:  srcPort,
+		data:     dataCopy,
+		doneChan: make(chan error, 1),
 	}
-	req.srcIP = nil
-	req.data = nil
-	udpSendReqPool.Put(req)
 }
 
 // PacketConn wraps a transparent lwIP UDP PCB into standard net.PacketConn and sing-tun N.PacketConn.
@@ -222,8 +207,7 @@ func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		isIPv6 = true
 	}
 
-	req := getUDPSendReq(c.id, isIPv6, udpAddr.IP, uint16(udpAddr.Port), p)
-	defer putUDPSendReq(req)
+	req := newUDPSendReq(c.id, isIPv6, udpAddr.IP, uint16(udpAddr.Port), p)
 
 	select {
 	case <-c.closeChan:
@@ -273,8 +257,7 @@ func (c *PacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) er
 	}
 
 	srcIP := destination.Addr.AsSlice()
-	req := getUDPSendReq(c.id, destination.Addr.Is6(), srcIP, destination.Port, data)
-	defer putUDPSendReq(req)
+	req := newUDPSendReq(c.id, destination.Addr.Is6(), srcIP, destination.Port, data)
 
 	select {
 	case <-c.closeChan:

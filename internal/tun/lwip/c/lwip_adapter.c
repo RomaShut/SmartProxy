@@ -236,13 +236,9 @@ static void sp_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const
     if (p->next == NULL) {
         lw->udp_recv(conn->id, is_ipv6, src_ip, pcb->remote_port, dst_ip, pcb->local_port, (const uint8_t *)p->payload, (uint16_t)p->tot_len, lw->ctx_id);
     } else {
-        uint8_t *tmp = (uint8_t *)malloc(p->tot_len);
-        if (tmp) {
-            u16_t copied = pbuf_copy_partial(p, tmp, (u16_t)p->tot_len, 0);
-            if (copied == p->tot_len) {
-                lw->udp_recv(conn->id, is_ipv6, src_ip, pcb->remote_port, dst_ip, pcb->local_port, tmp, copied, lw->ctx_id);
-            }
-            free(tmp);
+        u16_t copied = pbuf_copy_partial(p, lw->output_buf, (u16_t)p->tot_len, 0);
+        if (copied == p->tot_len) {
+            lw->udp_recv(conn->id, is_ipv6, src_ip, pcb->remote_port, dst_ip, pcb->local_port, lw->output_buf, copied, lw->ctx_id);
         }
     }
     pbuf_free(p);

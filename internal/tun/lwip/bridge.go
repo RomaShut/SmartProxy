@@ -24,6 +24,22 @@ func goPacketOutput(data *C.uint8_t, length C.uint32_t, ctxID C.uint64_t) {
 	e.onPacketOutput(pkt)
 }
 
+func parseIP(ptr unsafe.Pointer, isIPv6 bool) net.IP {
+	if ptr == nil {
+		return nil
+	}
+	if isIPv6 {
+		b := (*[16]byte)(ptr)
+		ip := make(net.IP, 16)
+		copy(ip, b[:])
+		return ip
+	}
+	b := (*[4]byte)(ptr)
+	ip := make(net.IP, 4)
+	copy(ip, b[:])
+	return ip
+}
+
 //export goTcpAccept
 func goTcpAccept(connID C.uint64_t, isIPv6 C.int, srcIP unsafe.Pointer, srcPort C.uint16_t, dstIP unsafe.Pointer, dstPort C.uint16_t, ctxID C.uint64_t) {
 	engineID := uint64(ctxID)
@@ -32,14 +48,9 @@ func goTcpAccept(connID C.uint64_t, isIPv6 C.int, srcIP unsafe.Pointer, srcPort 
 		return
 	}
 
-	var sIP, dIP net.IP
-	if isIPv6 != 0 {
-		sIP = net.IP(C.GoBytes(srcIP, 16))
-		dIP = net.IP(C.GoBytes(dstIP, 16))
-	} else {
-		sIP = net.IP(C.GoBytes(srcIP, 4))
-		dIP = net.IP(C.GoBytes(dstIP, 4))
-	}
+	useIPv6 := isIPv6 != 0
+	sIP := parseIP(srcIP, useIPv6)
+	dIP := parseIP(dstIP, useIPv6)
 
 	e.onTCPAccept(uint64(connID), sIP, uint16(srcPort), dIP, uint16(dstPort))
 }
@@ -92,15 +103,10 @@ func goUdpRecv(connID C.uint64_t, isIPv6 C.int, srcIP unsafe.Pointer, srcPort C.
 		return
 	}
 
-	var sIP, dIP net.IP
-	if isIPv6 != 0 {
-		sIP = net.IP(C.GoBytes(srcIP, 16))
-		dIP = net.IP(C.GoBytes(dstIP, 16))
-	} else {
-		sIP = net.IP(C.GoBytes(srcIP, 4))
-		dIP = net.IP(C.GoBytes(dstIP, 4))
-	}
+	useIPv6 := isIPv6 != 0
+	sIP := parseIP(srcIP, useIPv6)
+	dIP := parseIP(dstIP, useIPv6)
 
 	b := C.GoBytes(unsafe.Pointer(data), C.int(length))
-	e.onUDPRecv(uint64(connID), isIPv6 != 0, sIP, uint16(srcPort), dIP, uint16(dstPort), b)
+	e.onUDPRecv(uint64(connID), useIPv6, sIP, uint16(srcPort), dIP, uint16(dstPort), b)
 }

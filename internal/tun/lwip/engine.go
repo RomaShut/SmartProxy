@@ -52,12 +52,24 @@ type Config struct {
 	UDPHandler func(conn *PacketConn)
 }
 
+type inPacket struct {
+	buf  *[]byte
+	data []byte
+}
+
+var inPacketPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
+
 // Engine manages the lwIP stack and runs the single owner goroutine.
 type Engine struct {
 	id        uint64
 	cfg       Config
 	lw        *C.struct_sp_lwip
-	inputChan chan []byte
+	inputChan chan inPacket
 	cmdChan   chan any
 	doneChan  chan struct{}
 	closeOnce sync.Once
@@ -82,7 +94,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 	e := &Engine{
 		cfg:       cfg,
 		lw:        lw,
-		inputChan: make(chan []byte, 1024),
+		inputChan: make(chan inPacket, 1024),
 		cmdChan:   make(chan any, 1024),
 		doneChan:  make(chan struct{}),
 		conns:     make(map[uint64]*Conn),
@@ -137,16 +149,30 @@ func (e *Engine) Input(packet []byte) error {
 		return nil
 	}
 
-	data := make([]byte, len(packet))
-	copy(data, packet)
+	var pkt inPacket
+	if len(packet) <= 2048 {
+		b := inPacketPool.Get().(*[]byte)
+		copy(*b, packet)
+		pkt = inPacket{buf: b, data: (*b)[:len(packet)]}
+	} else {
+		data := make([]byte, len(packet))
+		copy(data, packet)
+		pkt = inPacket{data: data}
+	}
 
 	select {
-	case e.inputChan <- data:
+	case e.inputChan <- pkt:
 		return nil
 	case <-e.doneChan:
+		if pkt.buf != nil {
+			inPacketPool.Put(pkt.buf)
+		}
 		return net.ErrClosed
 	default:
 		// Queue full: drop packet under congestion (standard IP behavior)
+		if pkt.buf != nil {
+			inPacketPool.Put(pkt.buf)
+		}
 		return nil
 	}
 }

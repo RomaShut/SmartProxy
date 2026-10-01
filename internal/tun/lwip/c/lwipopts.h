@@ -39,15 +39,17 @@
 #define IP_FRAG 1
 
 #define MEM_ALIGNMENT 4
-#define MEM_SIZE (64 * 1024)
-#define MEMP_NUM_TCP_PCB 128
+#define MEM_SIZE (1024 * 1024)
+#define PBUF_POOL_SIZE 512
+#define MEMP_NUM_TCP_PCB 256
 #define MEMP_NUM_TCP_PCB_LISTEN 32
-#define MEMP_NUM_TCP_SEG 256
-#define MEMP_NUM_UDP_PCB 128
+#define MEMP_NUM_TCP_SEG 1024
+#define MEMP_NUM_UDP_PCB 256
 
 #define TCP_MSS 1460
 #define TCP_SND_BUF (16 * TCP_MSS)
 #define TCP_WND (16 * TCP_MSS)
 #define TCP_QUEUE_OOSEQ 0
+#define LWIP_TCP_KEEPALIVE 1
 
 #endif

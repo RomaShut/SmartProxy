@@ -54,6 +54,18 @@ func (e *Engine) loop() {
 		}
 		e.udpConns = nil
 
+		for {
+			select {
+			case pkt := <-e.inputChan:
+				if pkt.buf != nil {
+					inPacketPool.Put(pkt.buf)
+				}
+			default:
+				goto drainedInput
+			}
+		}
+	drainedInput:
+
 		C.sp_lwip_destroy(e.lw)
 	}()
 
@@ -97,11 +109,13 @@ func (e *Engine) loop() {
 	}
 }
 
-func (e *Engine) handleInput(pkt []byte) {
-	if len(pkt) == 0 {
-		return
+func (e *Engine) handleInput(pkt inPacket) {
+	if len(pkt.data) > 0 {
+		C.sp_lwip_input(e.lw, unsafe.Pointer(&pkt.data[0]), C.uint32_t(len(pkt.data)))
 	}
-	C.sp_lwip_input(e.lw, unsafe.Pointer(&pkt[0]), C.uint32_t(len(pkt)))
+	if pkt.buf != nil {
+		inPacketPool.Put(pkt.buf)
+	}
 }
 
 func (e *Engine) handleCmd(cmd any) {
