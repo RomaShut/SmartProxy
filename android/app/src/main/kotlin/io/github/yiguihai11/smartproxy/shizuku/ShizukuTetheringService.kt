@@ -690,6 +690,9 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
             obj.put("ip", client.ip)
             obj.put("hostname", client.hostname ?: "")
             obj.put("type", client.tetheringType)
+            obj.put("vendor", client.vendor ?: "")
+            obj.put("is_random_mac", client.isRandomMac)
+            obj.put("os_guess", client.osGuess ?: "")
             arr.put(obj)
         }
         return arr.toString()
@@ -708,6 +711,9 @@ class ShizukuTetheringService : IShizukuTetheringService.Stub {
             obj.put("ip", client.ip)
             obj.put("hostname", client.hostname ?: "")
             obj.put("type", client.tetheringType)
+            obj.put("vendor", client.vendor ?: "")
+            obj.put("is_random_mac", client.isRandomMac)
+            obj.put("os_guess", client.osGuess ?: "")
             clientsArr.put(obj)
         }
 

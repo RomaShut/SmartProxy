@@ -25,11 +25,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Router
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Usb
 import androidx.compose.material.icons.outlined.WifiTethering
+import org.json.JSONArray
+import org.json.JSONObject
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -213,6 +217,85 @@ fun TetheringDialog(
     var operationJob by remember { mutableStateOf<Job?>(null) }
     var operationGeneration by remember { mutableStateOf(0L) }
     var bindJob by remember { mutableStateOf<Job?>(null) }
+    var connectedDevices by remember { mutableStateOf<List<TetheredDeviceDetail>>(emptyList()) }
+    var selectedDeviceDetail by remember { mutableStateOf<TetheredDeviceDetail?>(null) }
+
+    LaunchedEffect(tetheringService, state.hotspotEnabled, state.usbEnabled, state.routingActive) {
+        val service = tetheringService ?: run {
+            connectedDevices = emptyList()
+            return@LaunchedEffect
+        }
+        while (true) {
+            val statsJson = withContext(Dispatchers.IO) {
+                runCatching { service.tetheringConnectionStats }.getOrNull()
+            }
+            if (!statsJson.isNullOrBlank()) {
+                runCatching {
+                    val root = JSONObject(statsJson)
+                    val clientsArr = root.optJSONArray("clients") ?: JSONArray()
+                    val clientByIp = HashMap<String, JSONObject>()
+                    for (i in 0 until clientsArr.length()) {
+                        val c = clientsArr.getJSONObject(i)
+                        val ip = c.optString("ip", "")
+                        if (ip.isNotEmpty()) clientByIp[ip] = c
+                    }
+
+                    val appsArr = root.optJSONArray("apps") ?: JSONArray()
+                    val connsBySrcIp = HashMap<String, ArrayList<ConnStatsRec>>()
+                    for (i in 0 until appsArr.length()) {
+                        val a = appsArr.getJSONObject(i)
+                        val connsArr = a.optJSONArray("conns") ?: JSONArray()
+                        for (j in 0 until connsArr.length()) {
+                            val c = connsArr.getJSONObject(j)
+                            val srcIp = c.optString("src_ip", "")
+                            connsBySrcIp.getOrPut(srcIp) { ArrayList() }.add(
+                                ConnStatsRec(
+                                    proto = c.getInt("proto"),
+                                    host = c.getString("host"),
+                                    port = c.getInt("port"),
+                                    up = c.getLong("up"),
+                                    down = c.getLong("down"),
+                                    srcIp = srcIp,
+                                )
+                            )
+                        }
+                    }
+
+                    val allIps = (clientByIp.keys + connsBySrcIp.keys).filter { it.isNotBlank() }.toSet()
+                    val list = mutableListOf<TetheredDeviceDetail>()
+                    for (ip in allIps) {
+                        val clientObj = clientByIp[ip]
+                        val mac = clientObj?.optString("mac", "").orEmpty()
+                        val hostname = clientObj?.optString("hostname", "").orEmpty()
+                        val vendor = clientObj?.optString("vendor", "").orEmpty()
+                        val isRandomMac = clientObj?.optBoolean("is_random_mac", false) ?: false
+                        val osGuess = clientObj?.optString("os_guess", "").orEmpty()
+                        val tetheringType = clientObj?.optInt("type", -1) ?: -1
+                        val conns = connsBySrcIp[ip] ?: emptyList()
+                        val up = conns.sumOf { it.up }
+                        val down = conns.sumOf { it.down }
+
+                        list.add(
+                            TetheredDeviceDetail(
+                                ip = ip,
+                                mac = mac,
+                                hostname = hostname,
+                                vendor = vendor,
+                                isRandomMac = isRandomMac,
+                                osGuess = osGuess.ifBlank { "局域网接入设备" },
+                                tetheringType = tetheringType,
+                                upBytes = up,
+                                downBytes = down,
+                                conns = conns,
+                            )
+                        )
+                    }
+                    connectedDevices = list
+                }
+            }
+            delay(2000L)
+        }
+    }
 
     fun cancelOperation(): Long {
         operationGeneration++
@@ -594,6 +677,7 @@ fun TetheringDialog(
     val cardSurface = if (ThemeState.isDark) Color(0xFF38262F).copy(alpha = 0.95f) else Color.White.copy(alpha = 0.95f)
     val drawerSurface = if (ThemeState.isDark) Color(0xFF32212A) else Color(0xFFFDF4F7)
     val dividerLine = if (ThemeState.isDark) Color(0xFF4A3741) else Color(0xFFF0DCE5)
+    val textDark = if (ThemeState.isDark) Color(0xFFF3E3EA) else Color(0xFF3A2A31)
 
     val serviceConnected = tetheringService != null
     // 授权就绪 = Shizuku 授权弹窗点过并允许(READY)。仅 binder 绑上(serviceConnected)不算:
@@ -831,6 +915,87 @@ fun TetheringDialog(
                     )
                 }
 
+                // ── 可选: 已连接设备列表 ─────────────────────────
+                if (state.hotspotEnabled || state.usbEnabled || connectedDevices.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    TetheringSectionCard(
+                        icon = Icons.Outlined.Devices,
+                        title = stringResource(R.string.tethered_devices_title),
+                        status = if (connectedDevices.isEmpty()) {
+                            stringResource(R.string.tethered_devices_empty)
+                        } else {
+                            stringResource(R.string.tethered_devices_count, connectedDevices.size)
+                        },
+                        statusColor = if (connectedDevices.isEmpty()) greyText else Color(0xFF2EBD85),
+                        details = null,
+                        cardColor = cardSurface,
+                        titleColor = purpleDark,
+                        detailColor = greyText
+                    ) {
+                        if (connectedDevices.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                            ) {
+                                connectedDevices.forEach { dev ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { selectedDeviceDetail = dev }
+                                            .padding(vertical = 6.dp, horizontal = 2.dp)
+                                    ) {
+                                        Surface(
+                                            color = purpleFill.copy(alpha = 0.15f),
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.Devices,
+                                                    contentDescription = null,
+                                                    tint = purpleText,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                text = dev.hostname.ifBlank { dev.ip },
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = textDark,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = listOf(dev.ip, dev.osGuess).filter { it.isNotBlank() }.joinToString(" · "),
+                                                fontSize = 11.sp,
+                                                color = greyText,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { selectedDeviceDetail = dev },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Outlined.Info,
+                                                contentDescription = stringResource(R.string.cd_device_info),
+                                                tint = purpleText,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(16.dp))
 
                 // 底部关闭按钮
@@ -847,6 +1012,14 @@ fun TetheringDialog(
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color.White
+                    )
+                }
+
+                selectedDeviceDetail?.let { dev ->
+                    val current = connectedDevices.firstOrNull { it.ip == dev.ip } ?: dev
+                    TetheredDeviceDetailDialog(
+                        device = current,
+                        onDismiss = { selectedDeviceDetail = null }
                     )
                 }
             }

@@ -257,4 +257,36 @@
     <string name="shizuku_hotspot_disabled">Wi-Fi hotspot disabled</string>
     <string name="shizuku_hotspot_operation_failed">Hotspot operation failed (error %1$d)</string>
     <string name="shizuku_tethering_wrong_upstream">Tethering was cancelled while Android was switching connections. Wait a moment and retry.</string>
+
+    <!-- Connected Devices & Device Details -->
+    <string name="tethered_devices_title">Connected devices</string>
+    <string name="tethered_devices_empty">No devices connected</string>
+    <string name="tethered_devices_count">%1$d device(s) connected</string>
+    <string name="device_detail_title">Connected Device Details</string>
+    <string name="device_info_hardware">Hardware &amp; System</string>
+    <string name="device_info_network">Network &amp; Link</string>
+    <string name="device_info_traffic">Real-Time Traffic</string>
+    <string name="device_info_destinations">Active Destinations</string>
+    <string name="device_destinations_empty">No active connections for this device</string>
+    <string name="device_hostname">Device name</string>
+    <string name="device_os">Inferred OS / Type</string>
+    <string name="device_vendor">Brand / Vendor</string>
+    <string name="device_mac">MAC address</string>
+    <string name="device_random_mac">Randomized MAC (Privacy)</string>
+    <string name="device_standard_mac">Physical MAC</string>
+    <string name="device_ip">IPv4 address</string>
+    <string name="device_tethering_type">Link type</string>
+    <string name="device_type_wifi">Wi-Fi hotspot</string>
+    <string name="device_type_usb">USB tethering</string>
+    <string name="device_type_bluetooth">Bluetooth</string>
+    <string name="device_type_other">Local sharing</string>
+    <string name="device_speed_up">Upload</string>
+    <string name="device_speed_down">Download</string>
+    <string name="device_total_up">Total sent</string>
+    <string name="device_total_down">Total received</string>
+    <string name="device_active_conns">Active connections</string>
+    <string name="device_status_online">Online</string>
+    <string name="device_copied_to_clipboard">Copied %1$s to clipboard</string>
+    <string name="cd_device_info">Device details</string>
+    <string name="cd_copy">Copy to clipboard</string>
 </resources>

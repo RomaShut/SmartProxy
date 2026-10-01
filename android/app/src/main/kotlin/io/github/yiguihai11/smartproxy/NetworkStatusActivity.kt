@@ -40,6 +40,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -135,6 +137,8 @@ class NetworkStatusActivity : ComponentActivity() {
     /** 上次轮询的 app 累计基准(算 δ 网速);uid 表 + 图标缓存在轮询线程访问(使用并发 Map 防御跨调度器迭代冲突)。 */
     private val prevTotals = java.util.concurrent.ConcurrentHashMap<Int, Pair<Long, Long>>()
     private val metaCache = java.util.concurrent.ConcurrentHashMap<Int, AppMeta>()
+    private val tetheredDevices = java.util.concurrent.ConcurrentHashMap<Int, TetheredDeviceDetail>()
+    private var selectedTetheredDevice by mutableStateOf<TetheredDeviceDetail?>(null)
 
     /** 待确认封禁的连接(点连接行的封禁图标后置位,确认框消失时清空)。 */
     private var pendingBlock by mutableStateOf<ConnStatsRec?>(null)
@@ -236,11 +240,27 @@ class NetworkStatusActivity : ComponentActivity() {
                                     .onFailure { Log.e(TAG, "[NetworkStatus] setConnStatsPin failed", it) }
                             }
                         },
-                        onLongPress = { item -> openAppInfo(item.pkg) },
+                        onLongPress = { item ->
+                            if (item.uid < 0) {
+                                selectedTetheredDevice = tetheredDevices[item.uid]
+                            } else {
+                                openAppInfo(item.pkg)
+                            }
+                        },
+                        onShowDeviceInfo = { item ->
+                            selectedTetheredDevice = tetheredDevices[item.uid]
+                        },
                         onBlockConn = { conn -> pendingBlock = conn },
                         onPoll = poll,
                         onBack = { finish() }
                     )
+                    selectedTetheredDevice?.let { dev ->
+                        val latest = tetheredDevices.values.firstOrNull { it.ip == dev.ip } ?: dev
+                        TetheredDeviceDetailDialog(
+                            device = latest,
+                            onDismiss = { selectedTetheredDevice = null }
+                        )
+                    }
                     // 封禁确认框:持久化 ACL + 掐断现有连接是破坏性操作,弹框确认再执行。
                     pendingBlock?.let { conn ->
                         AlertDialog(
@@ -401,6 +421,10 @@ class NetworkStatusActivity : ComponentActivity() {
                 val clientObj = clientByIp[ip]
                 val mac = clientObj?.optString("mac", "").orEmpty()
                 val hostname = clientObj?.optString("hostname", "").orEmpty()
+                val vendor = clientObj?.optString("vendor", "").orEmpty()
+                val isRandomMac = clientObj?.optBoolean("is_random_mac", false) ?: false
+                val osGuess = clientObj?.optString("os_guess", "").orEmpty()
+                val tetheringType = clientObj?.optInt("type", -1) ?: -1
 
                 val conns = connsBySrcIp[ip] ?: emptyList()
                 val up = conns.sumOf { it.up }
@@ -420,6 +444,21 @@ class NetworkStatusActivity : ComponentActivity() {
                 val pkgDesc = if (mac.isNotBlank()) "MAC: $mac" else "热点外接设备"
                 metaCache[synthUid] = AppMeta(label, null, pkgDesc)
 
+                tetheredDevices[synthUid] = TetheredDeviceDetail(
+                    ip = ip,
+                    mac = mac,
+                    hostname = hostname,
+                    vendor = vendor,
+                    isRandomMac = isRandomMac,
+                    osGuess = osGuess.ifBlank { "局域网接入设备" },
+                    tetheringType = tetheringType,
+                    upBytes = up,
+                    downBytes = down,
+                    upBps = 0L,
+                    downBps = 0L,
+                    conns = conns,
+                )
+
                 out += AppStats(
                     uid = synthUid,
                     up = up,
@@ -436,11 +475,23 @@ class NetworkStatusActivity : ComponentActivity() {
     private fun buildItems(apps: List<AppStats>): List<AppItem> {
         val currentUids = apps.mapTo(HashSet()) { it.uid }
         prevTotals.keys.retainAll(currentUids)
+        tetheredDevices.keys.retainAll(currentUids)
         return apps.map { app ->
             val prev = prevTotals[app.uid]
             val upBps = if (prev == null) 0L else (app.up - prev.first).coerceAtLeast(0L)
             val downBps = if (prev == null) 0L else (app.down - prev.second).coerceAtLeast(0L)
             prevTotals[app.uid] = app.up to app.down
+
+            tetheredDevices[app.uid]?.let { existing ->
+                tetheredDevices[app.uid] = existing.copy(
+                    upBps = upBps,
+                    downBps = downBps,
+                    upBytes = app.up,
+                    downBytes = app.down,
+                    conns = app.conns,
+                )
+            }
+
             val meta = metaFor(app.uid)
             AppItem(app.uid, meta.label, meta.icon, meta.pkg, upBps, downBps, app.conns)
         }
@@ -474,6 +525,7 @@ class NetworkStatusActivity : ComponentActivity() {
 
 // ── 主题色(对齐首页 / 应用选择页樱花粉色系,深色同源)──────────────────────
 private val PurpleText get() = if (ThemeState.isDark) Color(0xFFF6B8CF) else Color(0xFFD66E9B)
+private val PurpleFill get() = if (ThemeState.isDark) Color(0xFFC25E87) else Color(0xFFD66E9B)
 private val PurpleSoft get() = if (ThemeState.isDark) Color(0xFFE9A8C3) else Color(0xFFE88EAF)
 private val GreyText get() = if (ThemeState.isDark) Color(0xFFC9A8B6) else Color(0xFF7A626D)
 private val TextDark get() = if (ThemeState.isDark) Color(0xFFF3E3EA) else Color(0xFF3A2A31)
@@ -517,6 +569,7 @@ private fun NetworkStatusScreen(
     active: Boolean,
     onToggleExpand: (Int) -> Unit,
     onLongPress: (AppItem) -> Unit,
+    onShowDeviceInfo: (AppItem) -> Unit,
     onBlockConn: (ConnStatsRec) -> Unit,
     onPoll: suspend () -> Unit,
     onBack: () -> Unit
@@ -590,6 +643,7 @@ private fun NetworkStatusScreen(
                             expanded = item.uid in expandedUids,
                             onToggle = { onToggleExpand(item.uid) },
                             onLongPress = { onLongPress(item) },
+                            onShowDeviceInfo = if (item.uid < 0) { { onShowDeviceInfo(item) } } else null,
                             onBlockConn = onBlockConn
                         )
                     }
@@ -612,7 +666,14 @@ private fun NetworkStatusScreen(
 
 /** 应用组:图标 + 名 + ↑/↓ 网速;单击展开/收起连接明细,长按跳系统应用信息页。 */
 @Composable
-private fun AppGroup(item: AppItem, expanded: Boolean, onToggle: () -> Unit, onLongPress: () -> Unit, onBlockConn: (ConnStatsRec) -> Unit) {
+private fun AppGroup(
+    item: AppItem,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: () -> Unit,
+    onShowDeviceInfo: (() -> Unit)? = null,
+    onBlockConn: (ConnStatsRec) -> Unit
+) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = CardBg,
@@ -634,6 +695,21 @@ private fun AppGroup(item: AppItem, expanded: Boolean, onToggle: () -> Unit, onL
                         contentDescription = null,
                         modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp))
                     )
+                } else if (item.uid < 0) {
+                    Surface(
+                        color = PurpleFill,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Outlined.Devices,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 } else {
                     Box(
                         modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(PlaceholderBg),
@@ -663,7 +739,21 @@ private fun AppGroup(item: AppItem, expanded: Boolean, onToggle: () -> Unit, onL
                     Text("↑ ${formatSpeed(item.upBps)}", fontSize = 12.sp, color = UpGreen)
                     Text("↓ ${formatSpeed(item.downBps)}", fontSize = 12.sp, color = DownBlue)
                 }
-                Spacer(Modifier.width(8.dp))
+                if (onShowDeviceInfo != null) {
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = onShowDeviceInfo,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Info,
+                            contentDescription = stringResource(R.string.cd_device_info),
+                            tint = PurpleText,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
                     contentDescription = if (expanded) stringResource(R.string.cd_collapse_conn) else stringResource(R.string.cd_expand_conn),
